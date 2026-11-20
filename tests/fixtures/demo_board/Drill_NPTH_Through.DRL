@@ -1,0 +1,17 @@
+M48
+;DRILL file {EasyEDA synthetic NPTH}
+;FORMAT={-:-/ absolute / metric / decimal}
+FMAT,2
+METRIC,TZ
+T1C2.200
+%
+G90
+G05
+M71
+T1
+X105.000Y55.000
+X155.000Y55.000
+X105.000Y85.000
+X155.000Y85.000
+T0
+M30
