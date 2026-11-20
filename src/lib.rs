@@ -1,5 +1,6 @@
 //! `ict-jig-gen`: generate ICT pogo-pin test cassettes from `EasyEDA` Gerber/Excellon packages.
 
+pub mod app;
 pub mod board;
 pub mod cassette;
 pub mod config;
@@ -12,6 +13,7 @@ pub mod numfmt;
 pub mod package;
 pub mod pinmap;
 pub mod pnp;
+pub mod report;
 pub mod stl;
 
 pub use error::{Error, Result};
