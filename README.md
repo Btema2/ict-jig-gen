@@ -2,7 +2,8 @@
 
 Pure-Rust CLI that turns an **EasyEDA Gerber/Excellon export** into
 
-1. a 3D-printable, two-layer **pogo-pin test cassette** (`cassette.stl`) for a 16-channel ICT fixture,
+1. a 3D-printable, two-layer **pogo-pin test cassette** (`cassette.stl`, or with `--split` two
+   support-free halves `cassette_bottom.stl` + `cassette_top.stl`) for a 16-channel ICT fixture,
 2. `lista_elementow.json`, the pin map read by the ICT-SCAN PRO desktop app,
 3. `wiring_guide.txt`, which numbered wire goes into which hole of the printed cassette.
 
