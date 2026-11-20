@@ -23,6 +23,21 @@
 //! without supports (see [`Joint`]): the bottom plate with its pillars, and the top plate
 //! shifted down to `Z = 0` (underside on the bed, posts / lip up).
 //!
+//! With `compact` the footprint shrinks to the board outline and the perimeter pillars give
+//! way to a [`SteppedPillar`] on every mounting hole: a round shoulder between the plates and a
+//! narrower pin that carries on through the top plate as the alignment post. Combined with
+//! `split`, the pins belong to the bottom part and the flat top plate slides down over them
+//! until it rests on the shoulders, so no screws are needed:
+//!
+//! ```text
+//!            ╻ post (tapered tip)          section through a compact pillar, split
+//!   z3 ━━━━━━┃━━━━━━━━━━━━  top plate: pogo bores + a socket around each pin
+//!   z2 ━━━━━━┃━━━━━━━━━━━━
+//!          ┌─┸─┐ shoulder (the top plate rests on its ledge)
+//!   z1 ━━━━┷━━━┷━━━━━━━━━━  bottom plate
+//!   z0 ━━━━━━━━━━━━━━━━━━━
+//! ```
+//!
 //! Coordinates: the cassette origin is the lower-left corner of the footprint; board
 //! coordinates map in with a pure translation (no mirroring: the board lies component-side up
 //! on the cassette, probes touch its underside pads).
@@ -52,6 +67,11 @@ const POST_PROTRUSION: f64 = 1.0;
 const POST_TIP_HEIGHT: f64 = 0.8;
 /// Extra distance between a feature and the lip wall.
 const LIP_FEATURE_GAP: f64 = 0.4;
+/// Width of the ledge from a compact pillar's pin socket out to its shoulder: where the top
+/// plate rests.
+pub const SHOULDER_LEDGE: f64 = 1.0;
+/// Fewest mounting holes `compact` can stand the plates on.
+pub const MIN_COMPACT_PILLARS: usize = 2;
 
 /// File name of the combined cassette (default mode).
 pub const STL_NAME: &str = "cassette.stl";
@@ -94,6 +114,37 @@ pub struct Post {
     pub diameter: f64,
 }
 
+/// A `compact` support pillar on one of the board's mounting holes.
+///
+/// Between the plates it is a round shoulder; above the shoulder a pin of the alignment post's
+/// diameter rises through the top plate and ends in the post's tapered tip. One-piece, the pin
+/// is fused into the top plate; with `split` it belongs to the bottom half and passes through a
+/// socket in the top plate, which rests on the shoulder.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SteppedPillar {
+    /// Centre in cassette coordinates (the mounting hole's centre).
+    pub center: Point,
+    /// Pin and alignment-post diameter: the mounting hole minus `clearance`.
+    pub pin_diameter: f64,
+    /// Socket through a split top plate: the pin plus `clearance` (a slip fit).
+    pub socket_diameter: f64,
+    /// Shoulder between the plates: the socket plus a [`SHOULDER_LEDGE`] on every side.
+    pub shoulder_diameter: f64,
+}
+
+impl SteppedPillar {
+    /// The pillar under `post` (any coordinate frame; the centre is copied).
+    fn under(post: &Post, mech: &Mechanical) -> Self {
+        let socket_diameter = post.diameter + mech.clearance;
+        Self {
+            center: post.center,
+            pin_diameter: post.diameter,
+            socket_diameter,
+            shoulder_diameter: socket_diameter + 2.0 * SHOULDER_LEDGE,
+        }
+    }
+}
+
 /// Axis-aligned rectangle in cassette coordinates.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Rect {
@@ -131,7 +182,8 @@ pub struct Fastener {
     pub boss_diameter: f64,
 }
 
-/// How the two halves of a `--split` cassette are joined.
+/// How the two halves of a `--split` cassette are joined by M3 screws (without `compact`;
+/// compact halves are held by the [`SteppedPillar`] pins instead).
 ///
 /// Both halves print flat on `Z = 0` (every downward-facing surface is on the bed). In the
 /// assembled cassette the top half sits `z_top_plate_bottom` higher than it prints.
@@ -166,6 +218,8 @@ pub struct Layout {
     pub depth: f64,
     /// Overall height including lip / posts.
     pub height: f64,
+    /// Plate beyond the board outline's bounding box on every side.
+    pub margin: f64,
     /// Translation from board to cassette coordinates.
     pub offset: Point,
     /// Top of the bottom plate.
@@ -182,9 +236,12 @@ pub struct Layout {
     pub posts: Vec<Post>,
     /// Registration pocket (inner face of the lip), if a lip was generated.
     pub pocket: Option<Rect>,
-    /// Support pillars.
+    /// Square support pillars in the margin (empty with `compact`).
     pub pillars: Vec<Rect>,
-    /// Screw joint between the halves (only with `split`).
+    /// `compact` only: a stepped pillar under every post, in the same order as `posts`.
+    pub stepped_pillars: Vec<SteppedPillar>,
+    /// Screw joint between the halves (`split` without `compact`; a compact split cassette
+    /// is held together by the stepped pillars' pins instead).
     pub joint: Option<Joint>,
 }
 
@@ -210,6 +267,24 @@ impl Solids {
             Self::Split { bottom, top } => vec![(STL_BOTTOM_NAME, bottom), (STL_TOP_NAME, top)],
         }
     }
+
+    /// Plastic in all parts together, mm³ (solid, i.e. before infill).
+    pub fn volume(&self) -> f64 {
+        self.files().iter().map(|(_, m)| m.signed_volume()).sum()
+    }
+}
+
+/// A `compact` cassette compared with the default one the same settings would give.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Savings {
+    /// Footprint of the default cassette along X, mm.
+    pub default_width: f64,
+    /// Footprint of the default cassette along Y, mm.
+    pub default_depth: f64,
+    /// Plastic in the default cassette (all parts), mm³.
+    pub default_volume: f64,
+    /// Plastic in this cassette (all parts), mm³.
+    pub volume: f64,
 }
 
 /// Generated cassette.
@@ -221,20 +296,56 @@ pub struct Cassette {
     pub layout: Layout,
     /// Non-fatal observations.
     pub warnings: Vec<String>,
+    /// With `compact`: how it compares with the default cassette (`None` otherwise, or when
+    /// the default cassette cannot be built for this board).
+    pub savings: Option<Savings>,
 }
 
 /// Build the cassette for the given probes (one hole per probe, in order).
 pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Cassette> {
+    let mut cassette = build_one(board, probes, mech)?;
+    if mech.compact {
+        let default = Mechanical {
+            compact: false,
+            margin: Mechanical::default().margin,
+            ..mech.clone()
+        };
+        cassette.savings = build_one(board, probes, &default).ok().map(|d| Savings {
+            default_width: d.layout.width,
+            default_depth: d.layout.depth,
+            default_volume: d.solids.volume(),
+            volume: cassette.solids.volume(),
+        });
+    }
+    Ok(cassette)
+}
+
+fn build_one(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Cassette> {
     if probes.is_empty() {
         return Err(Error::Geometry("no probe points selected".into()));
     }
     let mut warnings = Vec::new();
     let (mut posts, use_lip) = plan_alignment(board, mech, &mut warnings)?;
-    let margin = effective_margin(mech, use_lip, &mut warnings);
+    let mut stepped_pillars: Vec<SteppedPillar> = if mech.compact {
+        posts
+            .iter()
+            .map(|p| SteppedPillar::under(p, mech))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let margin = if mech.compact {
+        compact_margin(board, probes, &stepped_pillars, mech, &mut warnings)
+    } else {
+        effective_margin(mech, use_lip, &mut warnings)
+    };
     let offset = Point::new(margin - board.bbox.min.x, margin - board.bbox.min.y);
     let to_cassette = |p: Point| Point::new(p.x + offset.x, p.y + offset.y);
     for post in &mut posts {
         post.center = to_cassette(post.center);
+    }
+    for pillar in &mut stepped_pillars {
+        pillar.center = to_cassette(pillar.center);
     }
     let (width, depth) = (
         board.bbox.width() + 2.0 * margin,
@@ -250,8 +361,12 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
         );
         Rect { min, max }
     });
-    let pillars = plan_pillars(width, depth);
-    let joint = if mech.split {
+    let pillars = if mech.compact {
+        Vec::new()
+    } else {
+        plan_pillars(width, depth)
+    };
+    let joint = if mech.split && !mech.compact {
         Some(plan_joint(width, depth, mech, &mut warnings)?)
     } else {
         None
@@ -270,6 +385,7 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
         width,
         depth,
         height: top,
+        margin,
         offset,
         z_bottom_plate_top: z1,
         z_top_plate_bottom: z2,
@@ -279,10 +395,14 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
         posts,
         pocket,
         pillars,
+        stepped_pillars,
         joint,
     };
     check_clearances(&layout, probes, mech)?;
     stack_up_warning(mech, &mut warnings);
+    if mech.split {
+        one_line_warning(&layout.stepped_pillars, &mut warnings);
+    }
 
     let solids = assemble(&layout, mech)?;
     for (_, mesh) in solids.files() {
@@ -297,7 +417,98 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
         solids,
         layout,
         warnings,
+        savings: None,
     })
+}
+
+/// Distance from `p` to the nearest side of the board outline's bounding box (negative
+/// outside it).
+fn inset(board: &Board, p: Point) -> f64 {
+    let b = &board.bbox;
+    (p.x - b.min.x)
+        .min(b.max.x - p.x)
+        .min(p.y - b.min.y)
+        .min(b.max.y - p.y)
+}
+
+/// The margin for `compact`: the requested one (0 unless `--margin` is given), widened, with a
+/// warning, if a pogo bore or a pillar shoulder would otherwise come closer than `--min-wall` to
+/// the cassette edge. `pillars` are in board coordinates.
+fn compact_margin(
+    board: &Board,
+    probes: &[Probe],
+    pillars: &[SteppedPillar],
+    mech: &Mechanical,
+    warnings: &mut Vec<String>,
+) -> f64 {
+    let hole_r = mech.hole_diameter() / 2.0;
+    let bores = probes.iter().map(|p| {
+        (
+            hole_r - inset(board, p.hole.pos),
+            format!("pin {} ({})", p.pin, p.label),
+        )
+    });
+    let shoulders = pillars.iter().map(|s| {
+        (
+            s.shoulder_diameter / 2.0 - inset(board, s.center),
+            format!(
+                "the pillar on the mounting hole at ({:.2}, {:.2})",
+                s.center.x, s.center.y
+            ),
+        )
+    });
+    let Some((reach, what)) = bores.chain(shoulders).max_by(|a, b| a.0.total_cmp(&b.0)) else {
+        return mech.margin;
+    };
+    let needed = reach + mech.min_wall;
+    if needed <= mech.margin + 1e-9 {
+        return mech.margin;
+    }
+    // round up to 0.1 mm (the epsilon keeps an exact 0.9 from becoming 1.0)
+    let widened = ((needed - 1e-9) * 10.0).ceil() / 10.0;
+    warnings.push(format!(
+        "--compact: {what} needs {:.2} mm of plate beyond the board outline (--min-wall {} from \
+         the cassette edge); using a {widened:.1} mm margin instead of {:.1} mm",
+        needed.max(0.0),
+        mech.min_wall,
+        mech.margin
+    ));
+    widened
+}
+
+/// A split compact top plate rests on the shoulders only. If they all stand in (nearly) one
+/// line, nothing props it up on either side of that line.
+fn one_line_warning(pillars: &[SteppedPillar], warnings: &mut Vec<String>) {
+    let mut far: Option<(f64, Point, Point)> = None;
+    for (i, a) in pillars.iter().enumerate() {
+        for b in pillars.iter().skip(i + 1) {
+            let d = a.center.distance(b.center);
+            if far.is_none_or(|(best, _, _)| d > best) {
+                far = Some((d, a.center, b.center));
+            }
+        }
+    }
+    let Some((length, a, b)) = far.filter(|f| f.0 > 0.0) else {
+        return;
+    };
+    let off_line =
+        |p: Point| ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)).abs() / length;
+    let spread = pillars
+        .iter()
+        .map(|s| off_line(s.center))
+        .fold(0.0, f64::max);
+    let width = pillars
+        .iter()
+        .map(|s| s.shoulder_diameter)
+        .fold(0.0, f64::max);
+    if spread < width {
+        warnings.push(format!(
+            "--compact --split: the {} pillars stand in one line, so the loose top plate rests on \
+             that line only and can tip under an off-centre press; press the board down close to \
+             the posts",
+            pillars.len()
+        ));
+    }
 }
 
 /// The margin to build with. In split mode with a registration lip, the M3 screw head on each
@@ -404,6 +615,19 @@ fn plan_alignment(
             diameter: h.diameter - mech.clearance,
         })
         .collect();
+    if mech.compact {
+        // `Mechanical::validate` already limits the alignment to auto / posts
+        if eligible.len() < MIN_COMPACT_PILLARS {
+            return Err(Error::Geometry(format!(
+                "--compact stands the plates on pillars at the board's mounting holes and needs at \
+                 least {MIN_COMPACT_PILLARS} non-plated holes >= {MIN_POST_HOLE_DIAMETER} mm, but \
+                 the board has {}; drop --compact to build the default cassette, which locates the \
+                 board with a registration lip instead",
+                eligible.len()
+            )));
+        }
+        return Ok((eligible, false));
+    }
     let (use_posts, use_lip) = match mech.alignment {
         Alignment::None => (false, false),
         Alignment::Lip => (false, true),
@@ -461,6 +685,8 @@ fn plan_pillars(width: f64, depth: f64) -> Vec<Rect> {
 }
 
 fn check_clearances(layout: &Layout, probes: &[Probe], mech: &Mechanical) -> Result<()> {
+    // first: a compact shoulder is wider than its post, so the message names the real culprit
+    check_stepped_pillars(layout, probes, mech)?;
     let hole_r = layout.hole_diameter / 2.0;
     let min_pitch = layout.hole_diameter + mech.min_wall;
     for (i, (a, pa)) in layout.holes.iter().zip(probes).enumerate() {
@@ -538,6 +764,43 @@ fn check_clearances(layout: &Layout, probes: &[Probe], mech: &Mechanical) -> Res
     Ok(())
 }
 
+/// `compact`: no two shoulders may merge, and no pogo bore may cut into a shoulder (the barrel
+/// runs past it in the cavity). The bore keeps `--min-wall` from the shoulder.
+fn check_stepped_pillars(layout: &Layout, probes: &[Probe], mech: &Mechanical) -> Result<()> {
+    // mounting holes are named in board coordinates, as `ict-jig-gen holes` lists them
+    let board_xy = |p: Point| (p.x - layout.offset.x, p.y - layout.offset.y);
+    for (i, a) in layout.stepped_pillars.iter().enumerate() {
+        for b in layout.stepped_pillars.iter().skip(i + 1) {
+            let need = f64::midpoint(a.shoulder_diameter, b.shoulder_diameter) + mech.min_wall;
+            if a.center.distance(b.center) < need {
+                let ((ax, ay), (bx, by)) = (board_xy(a.center), board_xy(b.center));
+                return Err(Error::Geometry(format!(
+                    "--compact: the pillars on the mounting holes at ({ax:.2}, {ay:.2}) and \
+                     ({bx:.2}, {by:.2}) mm would merge (their shoulders need {need:.2} mm between \
+                     centres); drop --compact"
+                )));
+            }
+        }
+    }
+    let hole_r = layout.hole_diameter / 2.0;
+    for (a, pa) in layout.holes.iter().zip(probes) {
+        for s in &layout.stepped_pillars {
+            let need = hole_r + s.shoulder_diameter / 2.0 + mech.min_wall;
+            let d = a.distance(s.center);
+            if d < need {
+                let (x, y) = board_xy(s.center);
+                return Err(Error::Geometry(format!(
+                    "pin {} ({}) collides with the --compact pillar on the mounting hole at \
+                     ({x:.2}, {y:.2}) mm: they are {d:.2} mm apart, but the {:.2} mm shoulder and \
+                     the {:.2} mm bore need {need:.2} mm; choose another test point or drop --compact",
+                    pa.pin, pa.label, s.shoulder_diameter, layout.hole_diameter
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn inside_pocket(pocket: &Rect, p: Point, radius: f64, what: &str) -> Result<()> {
     let room = (p.x - pocket.min.x)
         .min(pocket.max.x - p.x)
@@ -591,7 +854,16 @@ impl Rings {
                 .iter()
                 .map(|h| circle([h.x, h.y], l.hole_diameter / 2.0 * circumscribe, n))
                 .collect(),
-            pillars: l.pillars.iter().map(Rect::ring).collect(),
+            pillars: l
+                .pillars
+                .iter()
+                .map(Rect::ring)
+                .chain(
+                    l.stepped_pillars
+                        .iter()
+                        .map(|s| circle([s.center.x, s.center.y], s.shoulder_diameter / 2.0, n)),
+                )
+                .collect(),
             posts: l
                 .posts
                 .iter()
@@ -619,12 +891,16 @@ impl Rings {
 
 fn assemble(l: &Layout, mech: &Mechanical) -> Result<Solids> {
     let r = Rings::new(l, mech.circle_segments);
-    match &l.joint {
-        None => Ok(Solids::Single(assemble_single(l, mech, &r)?)),
-        Some(joint) => Ok(Solids::Split {
+    match (&l.joint, mech.split) {
+        (Some(joint), _) => Ok(Solids::Split {
             bottom: assemble_bottom(l, &r, joint)?,
             top: assemble_top(l, mech, &r, joint)?,
         }),
+        (None, true) => Ok(Solids::Split {
+            bottom: assemble_pinned_bottom(l, mech, &r)?,
+            top: assemble_pinned_top(l, &r)?,
+        }),
+        (None, false) => Ok(Solids::Single(assemble_single(l, mech, &r)?)),
     }
 }
 
@@ -734,6 +1010,63 @@ fn assemble_top(l: &Layout, mech: &Mechanical, r: &Rings, joint: &Joint) -> Resu
     Ok(solid)
 }
 
+/// Compact split, bottom half, printed as it stands: the plate on the bed and a stepped pillar
+/// on every mounting hole, its pin running on up through where the top plate will sit and
+/// ending as the alignment post. Every face above the bed looks up or sideways.
+fn assemble_pinned_bottom(l: &Layout, mech: &Mechanical, r: &Rings) -> Result<Mesh> {
+    if l.stepped_pillars.is_empty() {
+        return Err(Error::Geometry(
+            "internal error: a split cassette without screws needs compact pillars".into(),
+        ));
+    }
+    let (z1, z2) = (l.z_bottom_plate_top, l.z_top_plate_bottom);
+    let post_top = l.z_top_plate_top + mech.pcb_thickness + POST_PROTRUSION;
+    let shoulders: Vec<Vec<P2>> = l
+        .stepped_pillars
+        .iter()
+        .map(|s| circle([s.center.x, s.center.y], s.shoulder_diameter / 2.0, r.n))
+        .collect();
+    let mut solid = Mesh::new();
+    solid.cap(&r.plate(&[]), 0.0, false)?;
+    r.plate_walls(&mut solid, &[], 0.0, z1);
+    solid.cap(&r.plate(&shoulders), z1, true)?;
+    for (s, shoulder) in l.stepped_pillars.iter().zip(&shoulders) {
+        let pin = circle([s.center.x, s.center.y], s.pin_diameter / 2.0, r.n);
+        solid.wall(shoulder, z1, z2, true);
+        // the ledge the top plate rests on
+        solid.cap(
+            &Region {
+                outer: shoulder.clone(),
+                holes: vec![pin.clone()],
+            },
+            z2,
+            true,
+        )?;
+        add_post(&mut solid, s.center, s.pin_diameter, &pin, z2, post_top)?;
+    }
+    Ok(solid)
+}
+
+/// Compact split, top half: a flat plate with the pogo bores and a socket for every pin. It is
+/// symmetric through its thickness, so it prints and assembles the same way up.
+fn assemble_pinned_top(l: &Layout, r: &Rings) -> Result<Mesh> {
+    let thickness = l.z_top_plate_top - l.z_top_plate_bottom;
+    let sockets: Vec<Vec<P2>> = l
+        .stepped_pillars
+        .iter()
+        .map(|s| {
+            let radius = s.socket_diameter / 2.0 * r.circumscribe;
+            circle([s.center.x, s.center.y], radius, r.n)
+        })
+        .collect();
+    let plate = r.plate(&sockets);
+    let mut solid = Mesh::new();
+    solid.cap(&plate, 0.0, false)?;
+    r.plate_walls(&mut solid, &sockets, 0.0, thickness);
+    solid.cap(&plate, thickness, true)?;
+    Ok(solid)
+}
+
 /// Everything on the top plate's upper face at `z3`: the board seat, registration lip and
 /// alignment posts. `sockets` are extra through-holes in the plate outside the seat.
 fn add_deck(
@@ -790,22 +1123,34 @@ fn add_posts(
     rings: &[Vec<P2>],
     z3: f64,
 ) -> Result<()> {
-    let height = mech.pcb_thickness + POST_PROTRUSION;
-    let shaft_top = z3 + height - POST_TIP_HEIGHT;
+    let top = z3 + mech.pcb_thickness + POST_PROTRUSION;
     for (post, ring) in l.posts.iter().zip(rings) {
-        let r = post.diameter / 2.0;
-        let tip_r = (r - 0.5).max(r * 0.5);
-        let tip = circle([post.center.x, post.center.y], tip_r, ring.len());
-        solid.wall(ring, z3, shaft_top, true);
-        solid.frustum(ring, shaft_top, &tip, z3 + height);
-        solid.cap(
-            &Region {
-                outer: tip,
-                holes: vec![],
-            },
-            z3 + height,
-            true,
-        )?;
+        add_post(solid, post.center, post.diameter, ring, z3, top)?;
     }
     Ok(())
+}
+
+/// A round shaft on `ring` from `base` up to a tapered tip that ends at `top`.
+fn add_post(
+    solid: &mut Mesh,
+    center: Point,
+    diameter: f64,
+    ring: &[P2],
+    base: f64,
+    top: f64,
+) -> Result<()> {
+    let r = diameter / 2.0;
+    let tip_r = (r - 0.5).max(r * 0.5);
+    let tip = circle([center.x, center.y], tip_r, ring.len());
+    let shaft_top = top - POST_TIP_HEIGHT;
+    solid.wall(ring, base, shaft_top, true);
+    solid.frustum(ring, shaft_top, &tip, top);
+    solid.cap(
+        &Region {
+            outer: tip,
+            holes: vec![],
+        },
+        top,
+        true,
+    )
 }

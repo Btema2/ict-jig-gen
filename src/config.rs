@@ -12,6 +12,11 @@ use crate::error::{Error, Result};
 /// Highest multiplexer channel number (the fixture has 16 channels: `0..=15`).
 pub const MAX_PIN: u8 = 15;
 
+/// Smallest margin of the default cassette: its perimeter pillars stand in the margin.
+const MIN_MARGIN: f64 = 7.0;
+/// Margin used by `compact` unless one is given: the footprint is the board outline.
+pub const COMPACT_MARGIN: f64 = 0.0;
+
 /// Kind of a `lista_elementow.json` entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -79,6 +84,19 @@ pub enum Alignment {
     None,
 }
 
+impl Alignment {
+    /// The name used on the command line and in config files.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Posts => "posts",
+            Self::Lip => "lip",
+            Self::Both => "both",
+            Self::None => "none",
+        }
+    }
+}
+
 impl FromStr for Alignment {
     type Err = String;
     fn from_str(s: &str) -> std::result::Result<Self, String> {
@@ -118,8 +136,11 @@ pub struct Mechanical {
     pub alignment: Alignment,
     /// Polygon segments per circle.
     pub circle_segments: usize,
-    /// Emit two flat-printable halves joined by M3 screws instead of one combined solid.
+    /// Emit two flat-printable halves instead of one combined solid.
     pub split: bool,
+    /// Shrink the footprint to the board outline and stand the plates on pillars at the
+    /// board's mounting holes instead of perimeter pillars (with `split`: no screws).
+    pub compact: bool,
 }
 
 impl Default for Mechanical {
@@ -141,6 +162,7 @@ impl Default for Mechanical {
             alignment: Alignment::Auto,
             circle_segments: 32,
             split: false,
+            compact: false,
         }
     }
 }
@@ -167,12 +189,21 @@ impl Mechanical {
         check("clearance", self.clearance, 0.0, 1.0)?;
         check("plate thickness", self.plate_thickness, 1.0, 20.0)?;
         check("standoff height", self.standoff_height, 1.0, 100.0)?;
-        check("margin", self.margin, 7.0, 50.0)?;
+        // the perimeter pillars live in the margin; compact mode has none
+        let min_margin = if self.compact { 0.0 } else { MIN_MARGIN };
+        check("margin", self.margin, min_margin, 50.0)?;
         check("min wall", self.min_wall, 0.2, 5.0)?;
         check("pcb thickness", self.pcb_thickness, 0.2, 6.0)?;
         check("lip height", self.lip_height, 0.2, 10.0)?;
         if !(8..=128).contains(&self.circle_segments) {
             return Err(Error::Config("circle segments must be 8..=128".into()));
+        }
+        if self.compact && !matches!(self.alignment, Alignment::Auto | Alignment::Posts) {
+            return Err(Error::Config(format!(
+                "--compact locates the board on posts at its mounting holes, so --alignment {} is \
+                 not available with it; use auto or posts, or drop --compact",
+                self.alignment.name()
+            )));
         }
         Ok(())
     }
@@ -386,6 +417,8 @@ pub struct ConfigFile {
     /// Write `cassette_bottom.stl` + `cassette_top.stl` (print flat, no supports) instead of
     /// one `cassette.stl`.
     pub split: Option<bool>,
+    /// Footprint = board outline, pillars on the mounting holes (needs >= 2 of them).
+    pub compact: Option<bool>,
     /// Existing board image to take pixel dimensions from.
     pub image: Option<PathBuf>,
     /// Explicit `WxH` (wins over `image`).
@@ -436,6 +469,7 @@ impl ConfigFile {
             lip_height,
             alignment,
             split,
+            compact,
             include_vias,
             auto_elements
         );
@@ -524,6 +558,10 @@ impl Settings {
             mech.alignment = a;
         }
         mech.split = cfg.split.unwrap_or(false);
+        mech.compact = cfg.compact.unwrap_or(false);
+        if mech.compact && cfg.margin.is_none() {
+            mech.margin = COMPACT_MARGIN;
+        }
         mech.validate()?;
 
         let image = match (&cfg.image_size, &cfg.image) {
@@ -713,6 +751,60 @@ mod tests {
             ..ConfigFile::default()
         });
         assert!(!Settings::resolve(cfg).unwrap().mech.split);
+    }
+
+    #[test]
+    fn compact_drops_the_default_margin_unless_one_is_given() {
+        let s = Settings::resolve(ConfigFile::default()).unwrap();
+        assert!(!s.mech.compact);
+        assert!((s.mech.margin - 8.0).abs() < 1e-12);
+        let mut cfg: ConfigFile = toml::from_str("compact = true").unwrap();
+        let s = Settings::resolve(cfg.clone()).unwrap();
+        assert!(s.mech.compact && s.mech.margin == COMPACT_MARGIN);
+        // an explicit margin wins, and compact accepts margins the default cassette refuses
+        cfg.overlay(ConfigFile {
+            margin: Some(2.5),
+            ..ConfigFile::default()
+        });
+        assert!((Settings::resolve(cfg.clone()).unwrap().mech.margin - 2.5).abs() < 1e-12);
+        cfg.overlay(ConfigFile {
+            compact: Some(false),
+            ..ConfigFile::default()
+        });
+        let e = Settings::resolve(cfg).unwrap_err().to_string();
+        assert!(e.contains("margin = 2.5") && e.contains("7..=50"), "{e}");
+    }
+
+    #[test]
+    fn compact_only_works_with_posts() {
+        for (alignment, ok) in [
+            (Alignment::Auto, true),
+            (Alignment::Posts, true),
+            (Alignment::Lip, false),
+            (Alignment::Both, false),
+            (Alignment::None, false),
+        ] {
+            let cfg = ConfigFile {
+                compact: Some(true),
+                alignment: Some(alignment),
+                ..ConfigFile::default()
+            };
+            match Settings::resolve(cfg) {
+                Ok(_) => assert!(ok, "{alignment:?}"),
+                Err(e) => {
+                    let e = e.to_string();
+                    assert!(!ok && e.contains("--compact") && e.contains("drop"), "{e}");
+                }
+            }
+        }
+        assert!(
+            Settings::resolve(ConfigFile {
+                margin: Some(-0.1),
+                compact: Some(true),
+                ..ConfigFile::default()
+            })
+            .is_err()
+        );
     }
 
     #[test]

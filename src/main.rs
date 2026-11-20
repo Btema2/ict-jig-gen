@@ -95,7 +95,7 @@ struct GenerateArgs {
     /// Gap between the two plates in mm [default 8].
     #[arg(long, value_name = "MM")]
     standoff_height: Option<f64>,
-    /// Plate margin around the board outline in mm [default 8].
+    /// Plate margin around the board outline in mm [default 8; 0 with --compact].
     #[arg(long, value_name = "MM")]
     margin: Option<f64>,
     /// Minimum printable wall between features in mm [default 0.8].
@@ -117,6 +117,15 @@ struct GenerateArgs {
     /// Write one combined cassette.stl even if the config file sets split = true.
     #[arg(long, conflicts_with = "split")]
     no_split: bool,
+    /// Save plastic and print time: shrink the cassette to the board outline (margin 0 unless
+    /// --margin is given) and stand the plates on pillars at the board's mounting holes instead
+    /// of perimeter pillars. With --split the top plate slides onto those pillars: no screws.
+    /// Needs at least 2 mounting holes.
+    #[arg(long)]
+    compact: bool,
+    /// Build the default cassette even if the config file sets compact = true.
+    #[arg(long, conflicts_with = "compact")]
+    no_compact: bool,
 
     /// Take the pixel size from an existing board image (PNG/JPEG).
     #[arg(long, value_name = "FILE")]
@@ -151,6 +160,11 @@ impl GenerateArgs {
             lip_height: self.lip_height,
             alignment: self.alignment,
             split: match (self.split, self.no_split) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            },
+            compact: match (self.compact, self.no_compact) {
                 (true, _) => Some(true),
                 (_, true) => Some(false),
                 _ => None,

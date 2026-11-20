@@ -722,3 +722,63 @@ fn cli_split_flag_and_config_key_write_two_halves() {
     assert!(plain.join("cassette.stl").exists());
     assert!(!plain.join("cassette_top.stl").exists());
 }
+
+#[test]
+fn cli_compact_flag_and_config_key_shrink_the_cassette() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |extra: &[&str], out: &std::path::Path| {
+        cli()
+            .arg("generate")
+            .arg(demo_zip())
+            .arg("--pnp")
+            .arg(demo_pnp())
+            .args(extra)
+            .arg("-o")
+            .arg(out)
+            .output()
+            .unwrap()
+    };
+    let footprint = |stl: &std::path::Path| {
+        let (lo, hi) = common::read_stl(stl).bounds().unwrap();
+        ((hi[0] - lo[0]).round(), (hi[1] - lo[1]).round())
+    };
+    // flag: one piece, the 60 x 40 mm board outline
+    let by_flag = dir.path().join("flag");
+    let o = run(&["--compact"], &by_flag);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert!(String::from_utf8(o.stdout).unwrap().contains("Compact   :"));
+    assert_eq!(footprint(&by_flag.join("cassette.stl")), (60.0, 40.0));
+    // config key, combined with --split
+    let cfg = dir.path().join("jig.toml");
+    std::fs::write(&cfg, "compact = true\n").unwrap();
+    let by_cfg = dir.path().join("cfg");
+    let o = run(&["--config", cfg.to_str().unwrap(), "--split"], &by_cfg);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    for half in ["cassette_bottom.stl", "cassette_top.stl"] {
+        assert!(
+            common::read_stl(&by_cfg.join(half))
+                .topology()
+                .is_watertight()
+        );
+        assert_eq!(footprint(&by_cfg.join(half)), (60.0, 40.0));
+    }
+    assert!(!by_cfg.join("cassette.stl").exists());
+    // --no-compact overrides the file: the default 8 mm margin is back
+    let no = dir.path().join("no");
+    let o = run(&["--config", cfg.to_str().unwrap(), "--no-compact"], &no);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    assert_eq!(footprint(&no.join("cassette.stl")), (76.0, 56.0));
+    // the two flags exclude each other; compact cannot use the lip
+    let o = run(&["--compact", "--no-compact"], &dir.path().join("both"));
+    assert!(!o.status.success());
+    let o = run(
+        &["--compact", "--alignment", "lip"],
+        &dir.path().join("lip"),
+    );
+    assert!(!o.status.success());
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("--alignment lip") && err.contains("drop --compact"),
+        "{err}"
+    );
+}

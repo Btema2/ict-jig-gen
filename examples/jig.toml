@@ -8,6 +8,7 @@ standoff_height = 8.0     # gap between the plates (mm)
 margin = 8.0              # plate overhang around the board outline (mm)
 alignment = "auto"        # auto | posts | lip | both | none
 split = false             # true: cassette_bottom.stl + cassette_top.stl, print flat, join with 4x M3 screws
+compact = false           # true: footprint = board outline, pillars on the mounting holes (>= 2); with split: no screws
 image_size = "512x512"    # pixel size of zdjecie_plytki.png (or: image = "zdjecie_plytki.png")
 
 # Explicit pin assignment. When any [[probe]] is present, automatic selection is off, so this
