@@ -21,7 +21,7 @@
 //!
 //! With `split` the same cassette is emitted as two parts that each print flat on `Z = 0`
 //! without supports (see [`Joint`]): the bottom plate with its pillars, and the top plate
-//! turned over to its natural print orientation (underside on the bed, posts / lip up).
+//! shifted down to `Z = 0` (underside on the bed, posts / lip up).
 //!
 //! Coordinates: the cassette origin is the lower-left corner of the footprint; board
 //! coordinates map in with a pure translation (no mirroring: the board lies component-side up
@@ -53,13 +53,24 @@ const POST_TIP_HEIGHT: f64 = 0.8;
 /// Extra distance between a feature and the lip wall.
 const LIP_FEATURE_GAP: f64 = 0.4;
 
+/// File name of the combined cassette (default mode).
+pub const STL_NAME: &str = "cassette.stl";
+/// File name of the bottom half with `split`.
+pub const STL_BOTTOM_NAME: &str = "cassette_bottom.stl";
+/// File name of the top half with `split`.
+pub const STL_TOP_NAME: &str = "cassette_top.stl";
+
 /// Pilot hole in each fastening boss, sized for a thread-forming M3 screw in PLA.
 pub const SCREW_PILOT_DIAMETER: f64 = 2.6;
-/// Diameter of the locating boss on a plain corner pillar (pilot + 0.7 mm walls).
-pub const BOSS_DIAMETER: f64 = 4.0;
-/// Diameter of the keyed boss (lower-left corner): too big for the other sockets, so the top
-/// half only fits one way round.
-pub const KEYED_BOSS_DIAMETER: f64 = 4.4;
+/// Thinnest wall around the pilot hole, whatever `--min-wall` says (a thread-forming screw
+/// splits anything thinner).
+const MIN_BOSS_WALL: f64 = 0.7;
+/// How much bigger than a plain socket the keyed boss is, so it cannot enter one.
+const KEY_STEP: f64 = 0.3;
+/// Air kept between a screw head and the lip's outer corner.
+const HEAD_LIP_GAP: f64 = 0.1;
+/// Gap kept between a boss and the edge of its pillar.
+const BOSS_EDGE_GAP: f64 = 0.1;
 /// Longest locating boss.
 const BOSS_MAX_HEIGHT: f64 = 2.0;
 /// The boss stops at least this far below the top-plate surface, so the screw head clamps the
@@ -116,17 +127,8 @@ pub struct Fastener {
     pub center: Point,
     /// The lower-left fastener has the larger boss, so the top half cannot be fitted rotated.
     pub keyed: bool,
-}
-
-impl Fastener {
     /// Boss diameter on the bottom half.
-    pub fn boss_diameter(&self) -> f64 {
-        if self.keyed {
-            KEYED_BOSS_DIAMETER
-        } else {
-            BOSS_DIAMETER
-        }
-    }
+    pub boss_diameter: f64,
 }
 
 /// How the two halves of a `--split` cassette are joined.
@@ -151,7 +153,7 @@ pub struct Joint {
 impl Joint {
     /// Diameter of the socket cut through the top plate for `f`.
     pub fn socket_diameter(&self, f: &Fastener) -> f64 {
-        f.boss_diameter() + self.socket_clearance
+        f.boss_diameter + self.socket_clearance
     }
 }
 
@@ -201,11 +203,11 @@ pub enum Solids {
 }
 
 impl Solids {
-    /// The meshes in output order (`[cassette]` or `[bottom, top]`).
-    pub fn meshes(&self) -> Vec<&Mesh> {
+    /// The meshes with their output file names (`[cassette]` or `[bottom, top]`).
+    pub fn files(&self) -> Vec<(&'static str, &Mesh)> {
         match self {
-            Self::Single(m) => vec![m],
-            Self::Split { bottom, top } => vec![bottom, top],
+            Self::Single(m) => vec![(STL_NAME, m)],
+            Self::Split { bottom, top } => vec![(STL_BOTTOM_NAME, bottom), (STL_TOP_NAME, top)],
         }
     }
 }
@@ -249,10 +251,11 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
         Rect { min, max }
     });
     let pillars = plan_pillars(width, depth);
-    let joint = mech
-        .split
-        .then(|| plan_joint(width, depth, mech, &mut warnings));
-
+    let joint = if mech.split {
+        Some(plan_joint(width, depth, mech, &mut warnings)?)
+    } else {
+        None
+    };
     let z1 = mech.plate_thickness;
     let z2 = z1 + mech.standoff_height;
     let z3 = z2 + mech.plate_thickness;
@@ -282,7 +285,7 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
     stack_up_warning(mech, &mut warnings);
 
     let solids = assemble(&layout, mech)?;
-    for mesh in solids.meshes() {
+    for (_, mesh) in solids.files() {
         let topology = mesh.topology();
         if !topology.is_watertight() {
             return Err(Error::Geometry(format!(
@@ -297,18 +300,17 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
     })
 }
 
-/// The margin to build with: in split mode the M3 screw heads on the corner pillars must stay
-/// clear of the board seat and of the registration lip.
+/// The margin to build with. In split mode with a registration lip, the M3 screw head on each
+/// corner pillar must clear the lip's outer corner (the nearest part of the lip). Without a lip
+/// the screw heads clear the board seat for every margin `Mechanical::validate` accepts.
 fn effective_margin(mech: &Mechanical, use_lip: bool, warnings: &mut Vec<String>) -> f64 {
-    if !mech.split {
+    if !(mech.split && use_lip) {
         return mech.margin;
     }
-    let head_reach = PILLAR_INSET + PILLAR_SIZE / 2.0 + SCREW_HEAD_DIAMETER / 2.0;
-    let needed = if use_lip {
-        head_reach + POCKET_CLEARANCE + LIP_WALL
-    } else {
-        head_reach
-    };
+    let centre = PILLAR_INSET + PILLAR_SIZE / 2.0;
+    let lip_corner = POCKET_CLEARANCE + LIP_WALL;
+    let needed =
+        centre + lip_corner + SCREW_HEAD_DIAMETER / 2.0 / std::f64::consts::SQRT_2 + HEAD_LIP_GAP;
     if mech.margin < needed {
         warnings.push(format!(
             "--split with a registration lip needs a {needed:.2} mm margin for the M3 screw heads; \
@@ -320,7 +322,35 @@ fn effective_margin(mech: &Mechanical, use_lip: bool, warnings: &mut Vec<String>
     mech.margin
 }
 
-fn plan_joint(width: f64, depth: f64, mech: &Mechanical, warnings: &mut Vec<String>) -> Joint {
+fn plan_joint(
+    width: f64,
+    depth: f64,
+    mech: &Mechanical,
+    warnings: &mut Vec<String>,
+) -> Result<Joint> {
+    // The keyed boss (plain + clearance + KEY_STEP) must still fit the pillar, which caps the
+    // plain boss; its wall is as thick as `--min-wall` asks for, if the pillar allows.
+    let largest = PILLAR_SIZE - 2.0 * BOSS_EDGE_GAP;
+    let widest_plain = largest - mech.clearance - KEY_STEP;
+    let wanted = SCREW_PILOT_DIAMETER + 2.0 * mech.min_wall.max(MIN_BOSS_WALL);
+    let plain = wanted.min(widest_plain);
+    let wall = (plain - SCREW_PILOT_DIAMETER) / 2.0;
+    if wall < MIN_BOSS_WALL - 1e-9 {
+        return Err(Error::Geometry(format!(
+            "--split: with --clearance {} the keyed locating boss leaves only {wall:.2} mm of wall \
+             around the screw hole in a {PILLAR_SIZE} mm pillar (needs {MIN_BOSS_WALL} mm); reduce \
+             --clearance",
+            mech.clearance
+        )));
+    }
+    if wall < mech.min_wall - 1e-9 {
+        warnings.push(format!(
+            "--split: the locating bosses have {wall:.2} mm walls, thinner than --min-wall {} \
+             (the {PILLAR_SIZE} mm pillars leave no more room)",
+            mech.min_wall
+        ));
+    }
+    let keyed = plain + mech.clearance + KEY_STEP;
     let c = PILLAR_INSET + PILLAR_SIZE / 2.0;
     let fasteners = [
         (c, c),
@@ -333,6 +363,7 @@ fn plan_joint(width: f64, depth: f64, mech: &Mechanical, warnings: &mut Vec<Stri
     .map(|(i, (x, y))| Fastener {
         center: Point::new(x, y),
         keyed: i == 0,
+        boss_diameter: if i == 0 { keyed } else { plain },
     })
     .collect();
     let plate = mech.plate_thickness;
@@ -349,13 +380,13 @@ fn plan_joint(width: f64, depth: f64, mech: &Mechanical, warnings: &mut Vec<Stri
              thread in the bosses, wanted {MIN_SCREW_ENGAGEMENT} mm); increase --standoff-height"
         ));
     }
-    Joint {
+    Ok(Joint {
         fasteners,
         boss_height,
         pilot_depth: boss_height + mech.standoff_height,
         socket_clearance: mech.clearance,
         screw_length,
-    }
+    })
 }
 
 /// Posts are returned in board coordinates.
@@ -480,6 +511,21 @@ fn check_clearances(layout: &Layout, probes: &[Probe], mech: &Mechanical) -> Res
                 post.diameter / 2.0,
                 "an alignment post",
             )?;
+        }
+    }
+    if let Some(joint) = &layout.joint {
+        for post in &layout.posts {
+            for f in &joint.fasteners {
+                // the screw head stands above the top plate, the same side as the post
+                let need = SCREW_HEAD_DIAMETER / 2.0 + post.diameter / 2.0;
+                if f.center.distance(post.center) < need {
+                    return Err(Error::Geometry(format!(
+                        "an alignment post at ({:.2}, {:.2}) mm is too close to the M3 screw at \
+                         ({:.2}, {:.2}) mm used by --split (needs {need:.2} mm); increase --margin",
+                        post.center.x, post.center.y, f.center.x, f.center.y
+                    )));
+                }
+            }
         }
     }
     for (i, a) in layout.posts.iter().enumerate() {
@@ -608,6 +654,16 @@ fn assemble_single(l: &Layout, mech: &Mechanical, r: &Rings) -> Result<Mesh> {
 fn assemble_bottom(l: &Layout, r: &Rings, joint: &Joint) -> Result<Mesh> {
     let (z1, z2) = (l.z_bottom_plate_top, l.z_top_plate_bottom);
     let boss_top = z2 + joint.boss_height;
+    if let Some(f) = joint
+        .fasteners
+        .iter()
+        .find(|f| !l.pillars.iter().any(|p| p.contains(f.center)))
+    {
+        return Err(Error::Geometry(format!(
+            "internal error: the M3 fastener at ({:.2}, {:.2}) mm is not on a support pillar",
+            f.center.x, f.center.y
+        )));
+    }
     let mut solid = Mesh::new();
     solid.cap(&r.plate(&[]), 0.0, false)?;
     r.plate_walls(&mut solid, &[], 0.0, z1);
@@ -626,7 +682,7 @@ fn assemble_bottom(l: &Layout, r: &Rings, joint: &Joint) -> Result<Mesh> {
             continue;
         };
         let c = [f.center.x, f.center.y];
-        let boss = circle(c, f.boss_diameter() / 2.0, r.n);
+        let boss = circle(c, f.boss_diameter / 2.0, r.n);
         let pilot = circle(c, SCREW_PILOT_DIAMETER / 2.0 * r.circumscribe, r.n);
         // pillar top (ring around the boss), boss wall and top, then the blind pilot hole
         solid.cap(

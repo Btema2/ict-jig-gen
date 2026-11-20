@@ -114,6 +114,9 @@ struct GenerateArgs {
     /// screws, so no FDM supports are needed, instead of one cassette.stl.
     #[arg(long)]
     split: bool,
+    /// Write one combined cassette.stl even if the config file sets split = true.
+    #[arg(long, conflicts_with = "split")]
+    no_split: bool,
 
     /// Take the pixel size from an existing board image (PNG/JPEG).
     #[arg(long, value_name = "FILE")]
@@ -147,7 +150,11 @@ impl GenerateArgs {
             pcb_thickness: self.pcb_thickness,
             lip_height: self.lip_height,
             alignment: self.alignment,
-            split: self.split.then_some(true),
+            split: match (self.split, self.no_split) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            },
             image: self.image.clone(),
             image_size: self.image_size.map(|s| format!("{}x{}", s.width, s.height)),
             include_vias: self.include_vias.then_some(true),
@@ -190,8 +197,8 @@ fn run(cli: Cli) -> ict_jig_gen::Result<()> {
             let stls: Vec<String> = out
                 .stl_paths
                 .iter()
-                .zip(out.cassette.solids.meshes())
-                .map(|(path, mesh)| {
+                .zip(out.cassette.solids.files())
+                .map(|(path, (_, mesh))| {
                     format!("{} ({} triangles)", path.display(), mesh.triangle_count())
                 })
                 .collect();

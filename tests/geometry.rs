@@ -283,7 +283,7 @@ fn watertight_for_a_sweep_of_board_sizes() {
 
 // ------------------------------------------------------------------ --split
 
-use ict_jig_gen::cassette::{BOSS_DIAMETER, KEYED_BOSS_DIAMETER, SCREW_PILOT_DIAMETER};
+use ict_jig_gen::cassette::SCREW_PILOT_DIAMETER;
 use ict_jig_gen::mesh::Mesh;
 
 fn split_config() -> ConfigFile {
@@ -404,7 +404,7 @@ fn split_bores_stay_concentric_and_the_top_fits_over_the_bosses() {
         // boss: ring at the pillar top (z = 11), inscribed in its nominal diameter
         let boss = vertices_near(&bottom, x, y, 11.0, 3.0);
         assert_eq!(boss.len(), 32, "boss ring");
-        let boss_r = f.boss_diameter() / 2.0;
+        let boss_r = f.boss_diameter / 2.0;
         assert!(
             boss.iter()
                 .all(|v| (v[0] - x).hypot(v[1] - y) <= boss_r + EPS)
@@ -417,7 +417,7 @@ fn split_bores_stay_concentric_and_the_top_fits_over_the_bosses() {
                 .iter()
                 .map(|v| (v[0] - x).hypot(v[1] - y))
                 .fold(f64::MAX, f64::min);
-            assert!(min_r >= f.boss_diameter() / 2.0 + 0.075 - EPS, "{min_r}");
+            assert!(min_r >= f.boss_diameter / 2.0 + 0.075 - EPS, "{min_r}");
             assert!(min_r < boss_r + 0.3, "slop must stay a slip fit: {min_r}");
         }
         // blind pilot hole from the boss top down to the pillar base (z = 3)
@@ -434,22 +434,144 @@ fn split_bores_stay_concentric_and_the_top_fits_over_the_bosses() {
 }
 
 #[test]
-fn split_top_only_fits_one_way_round() {
-    let (out, _b, _t, _d) = split_demo(split_config());
-    let joint = out.cassette.layout.joint.unwrap();
-    let keyed: Vec<_> = joint.fasteners.iter().filter(|f| f.keyed).collect();
-    assert_eq!(keyed.len(), 1);
-    assert!(close(keyed[0].center.x, 4.0) && close(keyed[0].center.y, 4.0));
-    // the keyed boss does not fit a plain socket, so a 180-degree turn is impossible
-    assert!(
-        KEYED_BOSS_DIAMETER > BOSS_DIAMETER + joint.socket_clearance,
-        "key must not fit an ordinary socket"
-    );
-    assert!(close(keyed[0].boss_diameter(), KEYED_BOSS_DIAMETER));
+fn split_top_only_fits_one_way_round_at_any_clearance() {
+    for clearance in [0.0, 0.1, 0.15, 0.2, 0.3] {
+        let (out, _d) = generate_demo(ConfigFile {
+            clearance: Some(clearance),
+            ..split_config()
+        });
+        let joint = out.cassette.layout.joint.unwrap();
+        let keyed: Vec<_> = joint.fasteners.iter().filter(|f| f.keyed).collect();
+        assert_eq!(keyed.len(), 1);
+        assert!(close(keyed[0].center.x, 4.0) && close(keyed[0].center.y, 4.0));
+        for plain in joint.fasteners.iter().filter(|f| !f.keyed) {
+            // the keyed boss must be clearly too big for an ordinary socket
+            let socket = joint.socket_diameter(plain);
+            assert!(
+                keyed[0].boss_diameter >= socket + 0.25,
+                "clearance {clearance}: keyed boss {} vs plain socket {socket}",
+                keyed[0].boss_diameter
+            );
+            // ... and its walls around the pilot hole stay printable
+            assert!((plain.boss_diameter - SCREW_PILOT_DIAMETER) / 2.0 >= 0.7 - 1e-9);
+        }
+        // the keyed boss still sits inside its 5 mm pillar
+        assert!(keyed[0].boss_diameter <= 4.8 + 1e-9);
+    }
 }
 
 #[test]
-fn split_with_a_lip_widens_the_margin_for_the_screw_heads() {
+fn split_boss_walls_follow_min_wall_as_far_as_the_pillar_allows() {
+    let boss = |min_wall: f64| {
+        let (out, _d) = generate_demo(ConfigFile {
+            min_wall: Some(min_wall),
+            ..split_config()
+        });
+        let joint = out.cassette.layout.joint.unwrap();
+        let plain = joint
+            .fasteners
+            .iter()
+            .find(|f| !f.keyed)
+            .unwrap()
+            .boss_diameter;
+        (plain, out.cassette.warnings)
+    };
+    // 0.8 mm walls (the default) fit: no warning
+    let (plain, warnings) = boss(0.8);
+    assert!(
+        close(plain, SCREW_PILOT_DIAMETER + 1.6) && warnings.is_empty(),
+        "{warnings:?}"
+    );
+    // 1.0 mm does not leave room for the key in a 5 mm pillar: capped, and said so
+    let (plain, warnings) = boss(1.0);
+    assert!(plain < SCREW_PILOT_DIAMETER + 2.0 && plain > SCREW_PILOT_DIAMETER + 1.4);
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("thinner than --min-wall")),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn split_refuses_a_clearance_that_leaves_no_wall_around_the_screw() {
+    let dir = tempfile::tempdir().unwrap();
+    let err = ict_jig_gen::app::generate(&ict_jig_gen::app::GenerateRequest {
+        input: common::demo_zip(),
+        out_dir: dir.path().to_path_buf(),
+        pnp: Some(common::demo_pnp()),
+        config: ConfigFile {
+            clearance: Some(0.6),
+            ..split_config()
+        },
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("keyed locating boss"), "{err}");
+}
+
+#[test]
+fn split_refuses_a_post_that_would_hit_a_screw_head() {
+    let dir = tempfile::tempdir().unwrap();
+    common::write_package(
+        dir.path(),
+        (0.0, 0.0, 40.0, 30.0),
+        &[(20.0, 15.0), (22.54, 15.0)],
+        &[(-0.8, -0.8), (40.8, 30.8)], // board.rs accepts holes just outside the outline
+    );
+    let request = |split: bool| ict_jig_gen::app::GenerateRequest {
+        input: dir.path().to_path_buf(),
+        out_dir: dir.path().join("out"),
+        pnp: None,
+        config: ConfigFile {
+            margin: Some(7.0),
+            alignment: Some(Alignment::Posts),
+            split: Some(split),
+            ..ConfigFile::default()
+        },
+    };
+    ict_jig_gen::app::generate(&request(false)).unwrap();
+    let err = ict_jig_gen::app::generate(&request(true)).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("too close to the M3 screw") && !msg.contains("internal error"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn switching_output_mode_warns_about_the_stale_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |split: bool| {
+        ict_jig_gen::app::generate(&ict_jig_gen::app::GenerateRequest {
+            input: common::demo_zip(),
+            out_dir: dir.path().to_path_buf(),
+            pnp: Some(common::demo_pnp()),
+            config: ConfigFile {
+                split: Some(split),
+                ..ConfigFile::default()
+            },
+        })
+        .unwrap()
+    };
+    let stale = |out: &ict_jig_gen::app::Outputs, name: &str| {
+        out.warnings
+            .iter()
+            .any(|w| w.contains(name) && w.contains("earlier run"))
+    };
+    assert!(!stale(&run(false), "cassette"));
+    let split = run(true);
+    assert!(stale(&split, "cassette.stl"), "{:?}", split.warnings);
+    assert!(split.guide.contains("earlier run"));
+    let plain = run(false);
+    assert!(stale(&plain, "cassette_bottom.stl"), "{:?}", plain.warnings);
+    assert!(
+        dir.path().join("cassette.stl").exists(),
+        "files are never deleted"
+    );
+}
+
+#[test]
+fn split_with_a_lip_widens_the_margin_to_clear_the_screw_heads() {
     let dir = tempfile::tempdir().unwrap();
     let pkg = dir.path().join("pkg");
     std::fs::create_dir(&pkg).unwrap();
@@ -468,9 +590,11 @@ fn split_with_a_lip_widens_the_margin_for_the_screw_heads() {
     .unwrap();
     let l = &out.cassette.layout;
     assert!(l.pocket.is_some());
-    assert!(close(l.width, 40.0 + 2.0 * 9.15), "{}", l.width);
+    // screw centre 4.0 + lip corner 2.3 + head radius / sqrt 2 + 0.1 air
+    let needed = 4.0 + 2.3 + 2.85 / std::f64::consts::SQRT_2 + 0.1;
+    assert!(close(l.width, 40.0 + 2.0 * needed), "{}", l.width);
     assert!(
-        out.warnings.iter().any(|w| w.contains("9.15 mm margin")),
+        out.warnings.iter().any(|w| w.contains("8.42 mm margin")),
         "{:?}",
         out.warnings
     );

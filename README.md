@@ -99,7 +99,7 @@ footprint and pin the pads down with `H<n>` instead.
 | `--lip-height` | 1 | height of the registration lip |
 | `--pcb-thickness` | 1.6 | sets alignment-post height |
 | `--alignment` | `auto` | `auto`, `posts`, `lip`, `both`, `none` |
-| `--split` (`split = true`) | off | write `cassette_bottom.stl` + `cassette_top.stl` that print flat without supports, joined by 4 M3 screws (see [Split mode](#split-mode-print-without-supports)) |
+| `--split` / `--no-split` (`split = true`) | off | write `cassette_bottom.stl` + `cassette_top.stl` that print flat without supports, joined by 4 M3 screws (see [Split mode](#split-mode-print-without-supports)) |
 | `--image` / `--image-size` | `512x512` | pixel size for the JSON; `--image` reads a PNG/JPEG header, `--image-size WxH` wins |
 
 ## What the cassette looks like
@@ -154,12 +154,14 @@ flip either file; the top plate is already in its print orientation.
 chosen for the pillar height and printed in `wiring_guide.txt`: **M3 x 10 mm** with the default
 3 mm plates and 8 mm gap. No nuts: the screws cut their own thread in the 2.6 mm pilot holes.
 
-**Joint:** each corner pillar carries a round boss (4.0 mm) that stands up through a socket in
-the top plate, which locates the two plates concentrically; the socket is boss + `--clearance`,
+**Joint:** each corner pillar carries a round boss (4.2 mm by default: the 2.6 mm pilot hole
+plus `--min-wall` walls, never under 0.7 mm) that stands up through a socket in the top plate, which locates the two plates concentrically; the socket is boss + `--clearance`,
 the same slip fit as the pogo bores, so calibrate `--clearance` once for both. The screw goes
 through the top plate into the boss and clamps the plates together. With the default 3 mm plates the boss stops 1 mm below
 the plate surface so the screw head, not the boss, bears on the plate. The lower-left boss is
-larger (4.4 mm), so the top plate fits only one way round.
+always 0.3 mm larger than a plain socket (4.65 mm by default), so it cannot enter one and the top plate fits only
+one way round. If a large `--clearance` leaves too little wall around the screw, generation stops with an error;
+a `--min-wall` the 5 mm pillar cannot honour is capped and warned about.
 
 **Assembly:**
 
@@ -168,8 +170,11 @@ larger (4.4 mm), so the top plate fits only one way round.
 3. Lower the top part onto the pillars, bores over the pogo barrels, bosses into the sockets.
 4. Drive one M3 screw through each corner of the top plate. Snug is enough; do not overtighten PLA.
 
-**Notes:** with a registration lip (boards without mounting holes) the margin is raised to
-9.15 mm if needed so the screw heads clear the lip, and a warning says so. A warning is also
+**Notes:** `--no-split` overrides `split = true` from a config file. With a registration lip
+(boards without mounting holes) the margin is raised to about 8.4 mm if needed so the screw heads
+clear the lip, and a warning says so. A mounting-hole post closer than a screw head to a corner
+screw is refused with a message to increase `--margin`. Files from the other mode that an earlier
+run left in the output directory are never deleted, but a warning names them. A warning is also
 printed when the pillars are too short for a reliable M3 thread (increase `--standoff-height`).
 
 ## Output files

@@ -4,7 +4,7 @@ use std::fmt::Write as _;
 
 use crate::board::Board;
 use crate::cassette::{
-    BOSS_DIAMETER, Cassette, Joint, KEYED_BOSS_DIAMETER, SCREW_HEAD_DIAMETER, SCREW_PILOT_DIAMETER,
+    Cassette, Joint, SCREW_HEAD_DIAMETER, SCREW_PILOT_DIAMETER, STL_BOTTOM_NAME, STL_TOP_NAME,
 };
 use crate::config::{Mechanical, Typ};
 use crate::pinmap::{self, PinMap};
@@ -107,6 +107,13 @@ fn assembly_section(out: &mut String, joint: &Joint) {
         || format!("{screws}x M3 screws (no standard length fits these pillars)"),
         |len| format!("{screws}x M3 x {len} mm screws"),
     );
+    let boss = |keyed: bool| {
+        joint
+            .fasteners
+            .iter()
+            .find(|f| f.keyed == keyed)
+            .map_or(0.0, |f| f.boss_diameter)
+    };
     let key = joint
         .fasteners
         .iter()
@@ -120,11 +127,11 @@ fn assembly_section(out: &mut String, joint: &Joint) {
     );
     let _ = writeln!(
         out,
-        "  cassette_bottom.stl  bottom plate + pillars + locating bosses (bosses face up)"
+        "  {STL_BOTTOM_NAME}  bottom plate + pillars + locating bosses (bosses face up)"
     );
     let _ = writeln!(
         out,
-        "  cassette_top.stl     top plate as it prints: underside on the bed, posts/lip up"
+        "  {STL_TOP_NAME}     top plate as it prints: underside on the bed, posts/lip up"
     );
     let _ = writeln!(
         out,
@@ -148,11 +155,13 @@ fn assembly_section(out: &mut String, joint: &Joint) {
     );
     let _ = writeln!(
         out,
-        "     bosses enter the sockets. The lower-left boss{key} is {KEYED_BOSS_DIAMETER:.1} mm, the others"
+        "     bosses enter the sockets. The lower-left boss{key} is {:.2} mm, the others",
+        boss(true)
     );
     let _ = writeln!(
         out,
-        "     {BOSS_DIAMETER:.1} mm, so the top only fits one way round."
+        "     {:.2} mm, so the top only fits one way round.",
+        boss(false)
     );
     let _ = writeln!(
         out,

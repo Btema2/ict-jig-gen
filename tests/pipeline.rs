@@ -701,6 +701,21 @@ fn cli_split_flag_and_config_key_write_two_halves() {
         );
     }
     assert!(!by_cfg.join("cassette.stl").exists());
+    // --no-split overrides the file, and the two flags exclude each other
+    let by_no_flag = dir.path().join("noflag");
+    run(
+        &["--config", cfg.to_str().unwrap(), "--no-split"],
+        &by_no_flag,
+    );
+    assert!(by_no_flag.join("cassette.stl").exists());
+    assert!(!by_no_flag.join("cassette_top.stl").exists());
+    let both = cli()
+        .arg("generate")
+        .arg(demo_zip())
+        .args(["--split", "--no-split"])
+        .output()
+        .unwrap();
+    assert!(!both.status.success());
     // default
     let plain = dir.path().join("plain");
     run(&[], &plain);
