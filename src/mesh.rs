@@ -189,17 +189,36 @@ impl Mesh {
         let indices = earcutr::earcut(&flat, &hole_starts, 2)
             .map_err(|e| Error::Geometry(format!("triangulation failed: {e}")))?;
         for t in indices.chunks_exact(3) {
-            let corner = |i: usize| [points[t[i]][0], points[t[i]][1], height];
-            let (first, second, third) = (corner(0), corner(1), corner(2));
-            let area2 = (second[0] - first[0]) * (third[1] - first[1])
-                - (second[1] - first[1]) * (third[0] - first[0]);
-            if (area2 > 0.0) == up {
-                self.triangle(first, second, third);
+            let corners = [points[t[0]], points[t[1]], points[t[2]]];
+            let boundary = with_edge_points(corners, t, &points);
+            if boundary.len() == 3 {
+                self.flat_triangle(corners[0], corners[1], corners[2], height, up);
             } else {
-                self.triangle(first, third, second);
+                // Another region vertex lies on one of this triangle's edges (collinear
+                // pillar corners, for example). Fan the triangle around its centroid so
+                // that edge is split exactly where its neighbour is.
+                let centroid = [
+                    (corners[0][0] + corners[1][0] + corners[2][0]) / 3.0,
+                    (corners[0][1] + corners[1][1] + corners[2][1]) / 3.0,
+                ];
+                for (i, &from) in boundary.iter().enumerate() {
+                    let to = boundary[(i + 1) % boundary.len()];
+                    self.flat_triangle(from, to, centroid, height, up);
+                }
             }
         }
         Ok(())
+    }
+
+    /// One horizontal triangle at `height`, wound so its normal points up (`up`) or down.
+    fn flat_triangle(&mut self, a: P2, b: P2, c: P2, height: f64, up: bool) {
+        let area2 = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        let at = |q: P2| [q[0], q[1], height];
+        if (area2 > 0.0) == up {
+            self.triangle(at(a), at(b), at(c));
+        } else {
+            self.triangle(at(a), at(c), at(b));
+        }
     }
 
     /// Vertical wall along a counter-clockwise `ring` between `z0` and `z1`.
@@ -231,6 +250,34 @@ impl Mesh {
             }
         }
     }
+}
+
+/// The triangle's three corners in order, with every other region vertex that lies strictly
+/// inside one of its edges inserted in order along that edge.
+fn with_edge_points(corners: [P2; 3], ids: &[usize], points: &[P2]) -> Vec<P2> {
+    let mut out = Vec::with_capacity(3);
+    for k in 0..3 {
+        let (p, q) = (corners[k], corners[(k + 1) % 3]);
+        out.push(p);
+        let (dx, dy) = (q[0] - p[0], q[1] - p[1]);
+        let len2 = dx * dx + dy * dy;
+        let mut on_edge: Vec<(f64, P2)> = points
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !ids.contains(i))
+            .filter_map(|(_, &r)| {
+                let t = ((r[0] - p[0]) * dx + (r[1] - p[1]) * dy) / len2;
+                let cross = (r[0] - p[0]) * dy - (r[1] - p[1]) * dx;
+                // collinear to within 1 nm and strictly between the end points
+                let on_line = cross.abs() <= 1e-6 * len2.sqrt() * 1e-3;
+                (on_line && t > 1e-9 && t < 1.0 - 1e-9).then_some((t, r))
+            })
+            .collect();
+        on_edge.sort_by(|x, y| x.0.total_cmp(&y.0));
+        on_edge.dedup_by(|x, y| (x.0 - y.0).abs() < 1e-12);
+        out.extend(on_edge.into_iter().map(|(_, r)| r));
+    }
+    out
 }
 
 /// Counter-clockwise axis-aligned rectangle.

@@ -245,3 +245,38 @@ fn stack_up_that_starves_the_plunger_is_flagged() {
         ok.cassette.warnings
     );
 }
+
+/// Regression: pillars in a row of three or more have collinear edges, which used to leave
+/// T-junctions in the cavity floor/ceiling for some board sizes (e.g. 35.5 x 57.1 mm).
+#[test]
+fn watertight_for_a_sweep_of_board_sizes() {
+    let sizes = [
+        (35.5, 57.1),
+        (20.0, 20.0),
+        (31.0, 33.0),
+        (47.9, 41.3),
+        (60.0, 40.0),
+        (64.2, 90.7),
+        (88.8, 23.5),
+        (120.0, 75.0),
+        (150.5, 150.5),
+    ];
+    for (w, h) in sizes {
+        let dir = tempfile::tempdir().unwrap();
+        common::write_package(
+            dir.path(),
+            (0.0, 0.0, w, h),
+            &[(10.0, 10.0), (14.0, 12.0)],
+            &[],
+        );
+        let out = ict_jig_gen::app::generate(&ict_jig_gen::app::GenerateRequest {
+            input: dir.path().to_path_buf(),
+            out_dir: dir.path().join("out"),
+            pnp: None,
+            config: ConfigFile::default(),
+        })
+        .unwrap_or_else(|e| panic!("{w} x {h}: {e}"));
+        let topo = read_stl(&out.stl_path).topology();
+        assert!(topo.is_watertight(), "{w} x {h}: {topo:?}");
+    }
+}

@@ -178,6 +178,12 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
     stack_up_warning(mech, &mut warnings);
 
     let solid = assemble(&layout, mech)?;
+    let topology = solid.topology();
+    if !topology.is_watertight() {
+        return Err(Error::Geometry(format!(
+            "internal error: generated mesh is not watertight ({topology:?}); refusing to write it"
+        )));
+    }
     Ok(Cassette {
         mesh: solid,
         layout,
