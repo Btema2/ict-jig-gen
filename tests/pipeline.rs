@@ -439,7 +439,7 @@ fn malformed_and_missing_inputs_are_errors() {
     write_package(&bad, (0.0, 0.0, 40.0, 30.0), &[(10.0, 10.0)], &[]);
     std::fs::write(
         bad.join("Drill_PTH_Through.DRL"),
-        "M48\nMETRIC\nT1C0.9\n%\nT1\nXgarbage\n",
+        "M48\nMETRIC\nT1C0.9\n%\nT1\nX--5\n",
     )
     .unwrap();
     let e = run(&bad);
@@ -588,4 +588,80 @@ fn cli_holes_lists_candidates_and_failures_exit_non_zero() {
         .output()
         .unwrap();
     assert!(!o.status.success());
+}
+
+#[test]
+fn stray_text_and_lookalike_names_do_not_break_a_package() {
+    let dir = tempfile::tempdir().unwrap();
+    write_package(
+        dir.path(),
+        (0.0, 0.0, 40.0, 30.0),
+        &[(10.0, 10.0), (14.0, 12.0)],
+        &[],
+    );
+    std::fs::write(
+        dir.path().join("drill_notes.txt"),
+        "Call the fab about the T1 drill size\n",
+    )
+    .unwrap();
+    // a plated drill whose name merely contains the letters "via" is still a plated drill
+    std::fs::rename(
+        dir.path().join("Drill_PTH_Through.DRL"),
+        dir.path().join("Olivia_PTH_Through.DRL"),
+    )
+    .unwrap();
+    let out = app::generate(&request(
+        dir.path(),
+        &dir.path().join("o"),
+        ConfigFile::default(),
+    ))
+    .unwrap();
+    assert_eq!(out.board.plated.len(), 2);
+}
+
+#[test]
+fn pick_and_place_with_unannotated_parts_only_warns() {
+    let dir = tempfile::tempdir().unwrap();
+    write_package(
+        dir.path(),
+        (0.0, 0.0, 40.0, 30.0),
+        &[(10.0, 10.0), (14.0, 12.0)],
+        &[],
+    );
+    std::fs::write(
+        dir.path().join("PickAndPlace_x.csv"),
+        "Designator,Mid X,Mid Y\nR?,10,10\nR?,14,12\n",
+    )
+    .unwrap();
+    let out = app::generate(&request(
+        dir.path(),
+        &dir.path().join("o"),
+        ConfigFile::default(),
+    ))
+    .unwrap();
+    assert!(
+        out.warnings
+            .iter()
+            .any(|w| w.contains("duplicate designator R?")),
+        "{:?}",
+        out.warnings
+    );
+}
+
+#[test]
+fn example_config_file_loads_and_runs_on_the_fixture() {
+    let cfg = ConfigFile::load(&common::fixtures().join("../../examples/jig.toml")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let out = app::generate(&GenerateRequest {
+        pnp: Some(demo_pnp()),
+        ..request(&demo_zip(), dir.path(), cfg)
+    })
+    .unwrap();
+    assert_eq!(out.pin_map.probes.len(), 4);
+    assert!(
+        out.lista
+            .elementy
+            .iter()
+            .any(|e| e.nazwa == "VCC-GND" && e.piny == [14, 15])
+    );
 }

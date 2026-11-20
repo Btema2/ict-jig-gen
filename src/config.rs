@@ -468,20 +468,26 @@ impl Settings {
     /// Resolve defaults + file + overrides into validated settings.
     pub fn resolve(cfg: ConfigFile) -> Result<Self> {
         let mut mech = Mechanical::default();
+        let mut custom = false;
         if let Some(name) = &cfg.pogo {
-            mech.pogo = match PogoSpec::preset(name) {
-                Some(p) => p,
-                None if cfg.barrel_diameter.is_some() => PogoSpec {
-                    name: name.clone(),
-                    barrel_diameter: mech.pogo.barrel_diameter,
-                    length: mech.pogo.length,
-                    stroke: mech.pogo.stroke,
-                },
-                None => {
+            mech.pogo = if let Some(preset) = PogoSpec::preset(name) {
+                preset
+            } else {
+                let (Some(barrel_diameter), Some(length), Some(stroke)) =
+                    (cfg.barrel_diameter, cfg.pogo_length, cfg.pogo_stroke)
+                else {
                     return Err(Error::Config(format!(
-                        "unknown pogo model {name:?}; known: {} (or give barrel_diameter)",
+                        "unknown pogo model {name:?}; known: {}. A custom model needs barrel_diameter, \
+                         pogo_length and pogo_stroke",
                         PogoSpec::preset_names().join(", ")
                     )));
+                };
+                custom = true;
+                PogoSpec {
+                    name: name.clone(),
+                    barrel_diameter,
+                    length,
+                    stroke,
                 }
             };
         }
@@ -493,6 +499,13 @@ impl Settings {
         set(&mut mech.pogo.barrel_diameter, cfg.barrel_diameter);
         set(&mut mech.pogo.length, cfg.pogo_length);
         set(&mut mech.pogo.stroke, cfg.pogo_stroke);
+        if !custom
+            && (cfg.barrel_diameter.is_some()
+                || cfg.pogo_length.is_some()
+                || cfg.pogo_stroke.is_some())
+        {
+            mech.pogo.name = format!("{} (modified)", mech.pogo.name);
+        }
         set(&mut mech.clearance, cfg.clearance);
         set(&mut mech.plate_thickness, cfg.plate_thickness);
         set(&mut mech.standoff_height, cfg.standoff_height);
@@ -565,23 +578,38 @@ mod tests {
     }
 
     #[test]
-    fn unknown_pogo_needs_a_diameter() {
-        let cfg = ConfigFile {
-            pogo: Some("XYZ".into()),
-            ..ConfigFile::default()
-        };
-        assert!(
-            Settings::resolve(cfg)
-                .unwrap_err()
-                .to_string()
-                .contains("known: P75-LM2")
-        );
+    fn custom_pogo_needs_every_dimension_and_overrides_are_labelled() {
         let cfg = ConfigFile {
             pogo: Some("XYZ".into()),
             barrel_diameter: Some(0.8),
             ..ConfigFile::default()
         };
-        assert!((Settings::resolve(cfg).unwrap().mech.pogo.barrel_diameter - 0.8).abs() < 1e-12);
+        let e = Settings::resolve(cfg).unwrap_err().to_string();
+        assert!(
+            e.contains("known: P75-LM2") && e.contains("pogo_length"),
+            "{e}"
+        );
+        let cfg = ConfigFile {
+            pogo: Some("XYZ".into()),
+            barrel_diameter: Some(0.8),
+            pogo_length: Some(20.0),
+            pogo_stroke: Some(3.0),
+            ..ConfigFile::default()
+        };
+        let pogo = Settings::resolve(cfg).unwrap().mech.pogo;
+        assert_eq!(
+            (pogo.name.as_str(), pogo.length, pogo.stroke),
+            ("XYZ", 20.0, 3.0)
+        );
+        // overriding one dimension of a preset must not leave the preset's name on a different probe
+        let cfg = ConfigFile {
+            barrel_diameter: Some(1.1),
+            ..ConfigFile::default()
+        };
+        assert_eq!(
+            Settings::resolve(cfg).unwrap().mech.pogo.name,
+            "P75-LM2 (modified)"
+        );
     }
 
     #[test]

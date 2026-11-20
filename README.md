@@ -21,13 +21,19 @@ cargo run --release -- --help
 # 1. See which plated holes the board offers (ids H1.., component pads R1.1, ...)
 ict-jig-gen holes board_gerber.zip --pnp PickAndPlace_board.csv
 
-# 2. Generate everything into ./out
+# 2. Generate everything into ./out (<= 16 plated holes are assigned to pins 0.. automatically)
 ict-jig-gen generate board_gerber.zip \
     --pnp PickAndPlace_board.csv \
     --image zdjecie_plytki.png \
-    --rail VCC-GND=14,15 \
     -o out
+
+# 3. Read the pin numbers in out/wiring_guide.txt, then add rails between two of them
+ict-jig-gen generate board_gerber.zip --pnp PickAndPlace_board.csv \
+    --image zdjecie_plytki.png --rail VCC-GND=4,5 -o out
 ```
+
+Rails and elements may only use pins that have a probe, so look the numbers up in the wiring
+guide first. On a board with more than 16 holes, assign pins explicitly (next section).
 
 The input is the `.zip` EasyEDA gives you or the unzipped folder. Layers are found by name, so
 Standard (`Gerber_BoardOutlineLayer.GKO`, `Drill_PTH_Through.DRL`) and Pro exports both work:
@@ -40,15 +46,15 @@ Standard (`Gerber_BoardOutlineLayer.GKO`, `Drill_PTH_Through.DRL`) and Pro expor
 | `PickAndPlace_*.csv` | designators and component positions (optional; found in the package or via `--pnp`; tab/comma, UTF-8/UTF-16, `mm`/`mil` suffixes) |
 
 Metric and imperial Excellon files in the usual precisions (3:3, 4:2, 2:4, explicit decimal
-points, `TZ`/`LZ`) are understood. Malformed input is reported as an error with file and line,
-never a panic.
+points, `TZ`/`LZ`) are understood. Malformed input is reported as an error naming the file (and line where known),
+never a panic. Unusable Pick & Place rows (`R?` duplicates, blank cells) are skipped with a warning.
 
 ### Try it on the bundled fixture
 
 ```bash
 ict-jig-gen generate tests/fixtures/demo_board_gerber.zip \
     --pnp tests/fixtures/PickAndPlace_demo_board.csv \
-    --rail VCC-GND=4,5 --image-size 600x400 -o out
+    --rail VCC-GND=4,5 --image-size 600x400 -o out   # warns: J1 (pins 4,5) is also derived
 just preview out/cassette.stl out/iso.png        # needs f3d
 just preview-top out/cassette.stl out/top.png
 ```
@@ -81,12 +87,14 @@ footprint and pin the pads down with `H<n>` instead.
 | Flag | Default | Meaning |
 |---|---|---|
 | `--pogo` | `P75-LM2` | preset: `P75-LM2` (1.02 mm barrel, 16.54 mm long, 2 mm stroke) or `P100-E2` (1.36 mm, 33.35 mm, 6.35 mm) |
-| `--barrel-diameter`, `--pogo-length`, `--pogo-stroke` | from preset | custom pogo |
+| `--barrel-diameter`, `--pogo-length`, `--pogo-stroke` | from preset | override a preset (the guide then says "modified"); an unknown `--pogo` name needs all three |
+| `--include-vias` | off | also treat `*Via*.DRL` holes as probe candidates (pass it, or the same `--config`, to `holes` too so ids match) |
 | `--clearance` | 0.15 | added to the barrel diameter for the printed bore (hole = 1.17 mm by default) |
 | `--plate-thickness` | 3 | each guide plate |
 | `--standoff-height` | 8 | gap between the plates |
 | `--margin` | 8 (min 7) | plate overhang around the outline |
 | `--min-wall` | 0.8 | smallest printable wall between features |
+| `--lip-height` | 1 | height of the registration lip |
 | `--pcb-thickness` | 1.6 | sets alignment-post height |
 | `--alignment` | `auto` | `auto`, `posts`, `lip`, `both`, `none` |
 | `--image` / `--image-size` | `512x512` | pixel size for the JSON; `--image` reads a PNG/JPEG header, `--image-size WxH` wins |
@@ -105,15 +113,17 @@ pads, so board X/Y map onto the cassette without mirroring. Cassette coordinates
 origin at the lower-left corner of the footprint (board bounding box + margin).
 
 * **Alignment:** `auto` uses posts through the board's non-plated mounting holes (>= 1.5 mm; post
-  diameter = hole - clearance, with a tapered tip) when there are two or more, otherwise a 1 mm
-  raised lip around the board outline (0.3 mm clearance). Plated holes >= 2.5 mm count as mounting
+  diameter = hole - clearance, with a tapered tip). With two or more it uses posts only; with
+  exactly one it adds the lip too (one post cannot stop rotation); with none it uses just the
+  lip, a 1 mm raised frame around the board outline (0.3 mm clearance). Plated holes >= 2.5 mm count as mounting
   holes when there is no NPTH file.
 * **Checks:** the tool refuses two probe holes closer than `hole + min-wall` (1.97 mm for
   P75-LM2; 2.31 mm for P100-E2), holes that would clash with posts, pillars or the lip, and warns
   when the plate stack is too tall for the plunger to rise by its stroke above the top plate.
 * **Printing:** the top plate bridges the open cavity, so print with support enabled (the cavity
   is open on all sides, so supports can be removed and wires routed out sideways). The mesh is
-  watertight and every coordinate is in millimetres.
+  checked to be watertight before it is written (generation fails otherwise) and every
+  coordinate is in millimetres.
 * Holes are circumscribed polygons (32 segments), so the printed bore is never narrower than
   barrel + clearance. Calibrate `--clearance` for your printer and material.
 

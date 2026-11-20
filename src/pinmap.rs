@@ -2,7 +2,7 @@
 //! `lista_elementow.json` export.
 
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::Serialize;
 
@@ -220,6 +220,19 @@ impl PinMap {
             elements.retain(|e| e.name != element.name);
             elements.push(element);
         }
+        for (i, a) in elements.iter().enumerate() {
+            let key = |e: &Element| (e.pins[0].min(e.pins[1]), e.pins[0].max(e.pins[1]));
+            if let Some(b) = elements[i + 1..].iter().find(|b| key(b) == key(a)) {
+                warnings.push(format!(
+                    "{} and {} measure the same pin pair ({}-{}); the app will show both. Remove one \
+                     or give the rail the component's name to replace it",
+                    a.name,
+                    b.name,
+                    key(a).0,
+                    key(a).1
+                ));
+            }
+        }
         if elements.is_empty() {
             warnings.push(
                 "no elements defined: lista_elementow.json will be empty; add [[element]] entries \
@@ -322,7 +335,7 @@ fn explicit_assignment(
 }
 
 fn derive_elements(board: &Board, probes: &[Probe], warnings: &mut Vec<String>) -> Vec<Element> {
-    let mut by_component: HashMap<usize, Vec<&Probe>> = HashMap::new();
+    let mut by_component: BTreeMap<usize, Vec<&Probe>> = BTreeMap::new();
     for p in probes {
         if let Some(c) = p.component {
             by_component.entry(c).or_default().push(p);
@@ -687,6 +700,38 @@ mod tests {
         }
         let no_auto = settings(|c| c.auto_elements = Some(false));
         assert!(PinMap::build(&b, &no_auto).unwrap().elements.is_empty());
+    }
+
+    #[test]
+    fn duplicate_pin_pairs_and_warning_order_are_reported_deterministically() {
+        let b = sample();
+        let s = settings(|c| {
+            c.element = vec![ElementSpec::parse_pair("VCC-GND=2,3", Typ::Linia).unwrap()];
+        });
+        let map = PinMap::build(&b, &s).unwrap();
+        assert!(
+            map.warnings
+                .iter()
+                .any(|w| w.contains("R1 and VCC-GND measure the same pin pair (2-3)"))
+        );
+        let many = board(
+            vec![
+                hole(5.0, 5.0),
+                hole(7.0, 5.0),
+                hole(9.0, 5.0),
+                hole(30.0, 5.0),
+                hole(32.0, 5.0),
+                hole(34.0, 5.0),
+            ],
+            vec![comp("U2", 7.0, 5.0), comp("U1", 32.0, 5.0)],
+        );
+        let first = PinMap::build(&many, &settings(|_| {})).unwrap().warnings;
+        for _ in 0..20 {
+            assert_eq!(
+                PinMap::build(&many, &settings(|_| {})).unwrap().warnings,
+                first
+            );
+        }
     }
 
     #[test]

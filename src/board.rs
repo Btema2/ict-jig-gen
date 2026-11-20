@@ -1,11 +1,13 @@
 //! The parsed board: outline extents, drilled holes and (optionally) component centroids.
 
+use std::collections::HashMap;
+
 use crate::error::{Error, Result};
 use crate::excellon::{self, Hole};
 use crate::geom::{BBox, Point};
 use crate::gerber;
 use crate::package::{Layer, Package};
-use crate::pnp::{self, Component};
+use crate::pnp::{self, Component, PickAndPlace};
 
 /// Plated holes at least this large are mounting holes when no NPTH file exists.
 const MOUNTING_HOLE_MIN_DIAMETER: f64 = 2.5;
@@ -37,9 +39,8 @@ impl Board {
     pub fn from_package(pkg: &Package) -> Result<Self> {
         let outline = gerber::parse_outline(&text(&pkg.outline), &pkg.outline.name)?;
         let mut warnings = Vec::new();
-        let plated = load_drills(&pkg.plated, &mut warnings)?;
-        let mut mounting = load_drills(&pkg.non_plated, &mut warnings)?;
-        let mut plated = plated;
+        let mut plated = load_drills(&pkg.plated, &outline.bbox, &mut warnings)?;
+        let mut mounting = load_drills(&pkg.non_plated, &outline.bbox, &mut warnings)?;
 
         if mounting.is_empty() {
             let (large, small): (Vec<Hole>, Vec<Hole>) = plated
@@ -56,25 +57,12 @@ impl Board {
             }
         }
 
-        for hole in plated.iter().chain(&mounting) {
-            if !outline.bbox.contains(hole.pos, OUTSIDE_TOLERANCE_MM) {
-                return Err(Error::parse(
-                    &pkg.plated[0].name,
-                    format!(
-                        "hole at ({:.3}, {:.3}) mm lies outside the board outline \
-                         ({:.3}..{:.3}, {:.3}..{:.3}); drill and outline files use different origins",
-                        hole.pos.x,
-                        hole.pos.y,
-                        outline.bbox.min.x,
-                        outline.bbox.max.x,
-                        outline.bbox.min.y,
-                        outline.bbox.max.y
-                    ),
-                ));
-            }
-        }
         if plated.is_empty() {
-            return Err(Error::parse(&pkg.plated[0].name, "no plated holes found"));
+            let name = pkg
+                .plated
+                .first()
+                .map_or("plated drill file", |l| l.name.as_str());
+            return Err(Error::parse(name, "no plated holes found"));
         }
 
         let mut board = Self {
@@ -92,7 +80,13 @@ impl Board {
     }
 
     /// Attach component centroids (overrides any earlier set).
-    pub fn set_components(&mut self, components: Vec<Component>, file: &str) {
+    pub fn set_components(&mut self, parsed: PickAndPlace, file: &str) {
+        let PickAndPlace {
+            components,
+            warnings,
+        } = parsed;
+        self.warnings
+            .extend(warnings.into_iter().map(|w| format!("{file}: {w}")));
         let inside = components
             .iter()
             .filter(|c| self.bbox.contains(c.pos, 5.0))
@@ -112,7 +106,10 @@ fn text(layer: &Layer) -> String {
     String::from_utf8_lossy(&layer.bytes).into_owned()
 }
 
-fn load_drills(layers: &[Layer], warnings: &mut Vec<String>) -> Result<Vec<Hole>> {
+fn load_drills(layers: &[Layer], bbox: &BBox, warnings: &mut Vec<String>) -> Result<Vec<Hole>> {
+    // grid of DUPLICATE_TOLERANCE_MM-sized cells so de-duplication stays near-linear
+    let cell = |v: f64| (v / DUPLICATE_TOLERANCE_MM).floor();
+    let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
     let mut holes: Vec<Hole> = Vec::new();
     for layer in layers {
         let parsed = excellon::parse(&text(layer), &layer.name)?;
@@ -123,11 +120,30 @@ fn load_drills(layers: &[Layer], warnings: &mut Vec<String>) -> Result<Vec<Hole>
             ));
         }
         for hole in parsed.holes {
-            let duplicate = holes.iter().any(|h| {
-                h.pos.distance(hole.pos) < DUPLICATE_TOLERANCE_MM
-                    && (h.diameter - hole.diameter).abs() < DUPLICATE_TOLERANCE_MM
-            });
+            if !bbox.contains(hole.pos, OUTSIDE_TOLERANCE_MM) {
+                return Err(Error::parse(
+                    &layer.name,
+                    format!(
+                        "hole at ({:.3}, {:.3}) mm lies outside the board outline \
+                         ({:.3}..{:.3}, {:.3}..{:.3}); drill and outline files use different origins",
+                        hole.pos.x, hole.pos.y, bbox.min.x, bbox.max.x, bbox.min.y, bbox.max.y
+                    ),
+                ));
+            }
+            // cell indices are small (|coordinate| <= 5000 mm / 0.01 mm), so the cast is exact
+            #[allow(clippy::cast_possible_truncation)]
+            let key = (cell(hole.pos.x) as i64, cell(hole.pos.y) as i64);
+            let duplicate = (key.0 - 1..=key.0 + 1)
+                .flat_map(|cx| (key.1 - 1..=key.1 + 1).map(move |cy| (cx, cy)))
+                .filter_map(|k| grid.get(&k))
+                .flatten()
+                .any(|&i| {
+                    let h = &holes[i];
+                    h.pos.distance(hole.pos) < DUPLICATE_TOLERANCE_MM
+                        && (h.diameter - hole.diameter).abs() < DUPLICATE_TOLERANCE_MM
+                });
             if !duplicate {
+                grid.entry(key).or_default().push(holes.len());
                 holes.push(hole);
             }
         }

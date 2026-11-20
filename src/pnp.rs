@@ -18,8 +18,20 @@ pub struct Component {
     pub pos: Point,
 }
 
+/// A parsed Pick & Place file.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PickAndPlace {
+    /// Usable components in file order.
+    pub components: Vec<Component>,
+    /// Rows that were skipped (blank or duplicate designators, missing cells).
+    pub warnings: Vec<String>,
+}
+
 /// Parse a Pick & Place file from raw bytes (UTF-8, UTF-8 with BOM, or UTF-16 LE/BE).
-pub fn parse(bytes: &[u8], file: &str) -> Result<Vec<Component>> {
+///
+/// The file is optional input, so unusable *rows* (unannotated `R?` duplicates, blank cells)
+/// are skipped with a warning; a missing header or an unreadable number is still an error.
+pub fn parse(bytes: &[u8], file: &str) -> Result<PickAndPlace> {
     let text = decode(bytes, file)?;
     let mut lines = text
         .lines()
@@ -43,39 +55,41 @@ pub fn parse(bytes: &[u8], file: &str) -> Result<Vec<Component>> {
         .ok_or_else(|| Error::parse_at(file, header_idx + 1, "missing 'Mid Y' column"))?;
 
     let mut seen = HashSet::new();
-    let mut out = Vec::new();
+    let mut parsed = PickAndPlace::default();
     for (idx, line) in lines {
         let line_no = idx + 1;
         let fields = split_fields(line, delim);
-        let get = |col: usize, what: &str| {
-            fields
-                .get(col)
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .ok_or_else(|| Error::parse_at(file, line_no, format!("row has no {what} value")))
+        let cell = |col: usize| fields.get(col).map(|s| s.trim()).filter(|s| !s.is_empty());
+        let (Some(designator), Some(raw_x), Some(raw_y)) =
+            (cell(col_ref), cell(col_x), cell(col_y))
+        else {
+            parsed.warnings.push(format!(
+                "line {line_no}: skipped, designator or position is blank"
+            ));
+            continue;
         };
-        let designator = get(col_ref, "Designator")?.to_owned();
-        let coord = |col: usize, what: &str| -> Result<f64> {
-            let raw = get(col, what)?;
+        let coord = |raw: &str, what: &str| {
             parse_length(raw, delim)
                 .ok_or_else(|| Error::parse_at(file, line_no, format!("bad {what} value {raw:?}")))
         };
-        let pos = Point::new(coord(col_x, "Mid X")?, coord(col_y, "Mid Y")?);
-        if !seen.insert(designator.clone()) {
-            return Err(Error::parse_at(
-                file,
-                line_no,
-                format!("duplicate designator {designator}"),
+        let pos = Point::new(coord(raw_x, "Mid X")?, coord(raw_y, "Mid Y")?);
+        if !seen.insert(designator.to_owned()) {
+            parsed.warnings.push(format!(
+                "line {line_no}: skipped duplicate designator {designator}"
             ));
+            continue;
         }
-        out.push(Component { designator, pos });
+        parsed.components.push(Component {
+            designator: designator.to_owned(),
+            pos,
+        });
     }
-    Ok(out)
+    Ok(parsed)
 }
 
 fn decode(bytes: &[u8], file: &str) -> Result<String> {
     let utf16 = |data: &[u8], big_endian: bool| -> Result<String> {
-        if data.len() % 2 != 0 {
+        if !data.len().is_multiple_of(2) {
             return Err(Error::parse(file, "UTF-16 file has an odd number of bytes"));
         }
         let units: Vec<u16> = data
@@ -175,7 +189,7 @@ mod tests {
 
     #[test]
     fn tab_delimited_with_mm_suffix() {
-        let c = parse(TSV.as_bytes(), "pnp.csv").unwrap();
+        let c = parse(TSV.as_bytes(), "pnp.csv").unwrap().components;
         assert_eq!(c.len(), 2);
         assert_eq!(c[0].designator, "R1");
         assert!(close(c[0].pos.x, 115.0) && close(c[0].pos.y, 80.5));
@@ -185,7 +199,7 @@ mod tests {
     fn comma_delimited_with_mil_suffix_and_quotes() {
         let csv = "\"Designator\",\"Footprint\",\"Mid X\",\"Mid Y\"\n\
                    \"U1\",\"SOIC,8\",\"1000mil\",\"500.5mil\"\n";
-        let c = parse(csv.as_bytes(), "p.csv").unwrap();
+        let c = parse(csv.as_bytes(), "p.csv").unwrap().components;
         assert!(close(c[0].pos.x, 25.4) && close(c[0].pos.y, 500.5 * 0.0254));
     }
 
@@ -193,21 +207,21 @@ mod tests {
     fn utf16_le_with_bom_and_utf8_bom_and_bare_numbers() {
         let mut le = vec![0xFF, 0xFE];
         le.extend(TSV.encode_utf16().flat_map(u16::to_le_bytes));
-        assert_eq!(parse(&le, "f").unwrap().len(), 2);
+        assert_eq!(parse(&le, "f").unwrap().components.len(), 2);
         let mut be = vec![0xFE, 0xFF];
         be.extend(TSV.encode_utf16().flat_map(u16::to_be_bytes));
-        assert_eq!(parse(&be, "f").unwrap().len(), 2);
+        assert_eq!(parse(&be, "f").unwrap().components.len(), 2);
         let mut bom = vec![0xEF, 0xBB, 0xBF];
         bom.extend(TSV.bytes());
-        assert_eq!(parse(&bom, "f").unwrap().len(), 2);
+        assert_eq!(parse(&bom, "f").unwrap().components.len(), 2);
         let bare = parse(b"Designator,Mid X,Mid Y\nR9,3.5,4.5\n", "f").unwrap();
-        assert!(close(bare[0].pos.x, 3.5));
+        assert!(close(bare.components[0].pos.x, 3.5));
     }
 
     #[test]
     fn utf16_without_bom_is_detected() {
         let le: Vec<u8> = TSV.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        assert_eq!(parse(&le, "f").unwrap().len(), 2);
+        assert_eq!(parse(&le, "f").unwrap().components.len(), 2);
     }
 
     #[test]
@@ -216,14 +230,28 @@ mod tests {
             b"Layer,Mid Y,Ref X,Mid X,Designator\nTop,2mm,9mm,1mm,C1\n",
             "f",
         )
-        .unwrap();
+        .unwrap()
+        .components;
         assert!(close(c[0].pos.x, 1.0) && close(c[0].pos.y, 2.0));
     }
 
     #[test]
     fn blank_lines_and_preamble_are_tolerated() {
         let c = parse(b"\n\nDesignator,Mid X,Mid Y\n\nR1,1,2\n\n", "f").unwrap();
-        assert_eq!(c.len(), 1);
+        assert_eq!(c.components.len(), 1);
+    }
+
+    #[test]
+    fn unusable_rows_are_skipped_with_warnings() {
+        let p = parse(
+            b"Designator,Mid X,Mid Y\nR?,1,2\nR?,3,4\nR1,5\n,6,7\nC1,8,9\n",
+            "f",
+        )
+        .unwrap();
+        let names: Vec<_> = p.components.iter().map(|c| c.designator.as_str()).collect();
+        assert_eq!(names, ["R?", "C1"]);
+        assert_eq!(p.warnings.len(), 3, "{:?}", p.warnings);
+        assert!(p.warnings[0].contains("duplicate designator R?"));
     }
 
     #[test]
@@ -232,9 +260,7 @@ mod tests {
             ("", "no header"),
             ("Foo,Bar\n1,2\n", "no header"),
             ("Designator,Mid X\nR1,1\n", "Mid Y"),
-            ("Designator,Mid X,Mid Y\nR1,1\n", "no Mid Y"),
             ("Designator,Mid X,Mid Y\nR1,abc,2\n", "bad Mid X"),
-            ("Designator,Mid X,Mid Y\nR1,1,2\nR1,3,4\n", "duplicate"),
             ("Designator,Mid X,Mid Y\nR1,1e999mm,2\n", "bad Mid X"),
         ] {
             let e = parse(text.as_bytes(), "p.csv").unwrap_err().to_string();

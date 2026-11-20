@@ -30,6 +30,15 @@ pub struct DrillFile {
 }
 
 const MAX_COORD_MM: f64 = 5000.0;
+/// More holes than this means a corrupt (or hostile) file, not a PCB.
+const MAX_HOLES: usize = 100_000;
+
+/// Plausible fixed-point layout: 1..=12 digits in total (checked without overflow).
+fn valid_digits(int_digits: u8, dec_digits: u8) -> bool {
+    int_digits
+        .checked_add(dec_digits)
+        .is_some_and(|total| (1..=12).contains(&total))
+}
 
 struct State<'a> {
     file: &'a str,
@@ -89,8 +98,7 @@ impl State<'_> {
         };
         if let Some((i, d)) = spec.split_once(':')
             && let (Ok(i), Ok(d)) = (i.trim().parse::<u8>(), d.trim().parse::<u8>())
-            && i + d > 0
-            && i + d <= 12
+            && valid_digits(i, d)
         {
             self.digits = Some((i, d));
         }
@@ -111,6 +119,7 @@ impl State<'_> {
                 p if p.contains('.') && p.bytes().all(|b| b == b'0' || b == b'.') => {
                     if let Some((i, d)) = p.split_once('.')
                         && let (Ok(i), Ok(d)) = (u8::try_from(i.len()), u8::try_from(d.len()))
+                        && valid_digits(i, d)
                     {
                         self.digits.get_or_insert((i, d));
                     }
@@ -140,6 +149,13 @@ impl State<'_> {
         for (letter, v) in &toks {
             let n = v.parse::<u32>().ok();
             match (*letter, n) {
+                ('R', _) => {
+                    return Err(self.err(
+                        line,
+                        "repeat commands (R<n>X..Y..) are not supported; re-export the drill \
+                         file without 'repeat' compression",
+                    ));
+                }
                 ('G', Some(85)) => slot = true,
                 ('G', Some(0..=3)) => {
                     if !self.routing {
@@ -218,6 +234,12 @@ impl State<'_> {
             })
         };
         self.pos = Point::new(decode(x, self.pos.x)?, decode(y, self.pos.y)?);
+        if self.out.holes.len() >= MAX_HOLES {
+            return Err(self.err(
+                line,
+                format!("more than {MAX_HOLES} holes; file is not a PCB drill"),
+            ));
+        }
         self.out.holes.push(Hole {
             pos: self.pos,
             diameter,
@@ -321,6 +343,32 @@ mod tests {
             let e = parse(text, "x.DRL").unwrap_err().to_string();
             assert!(e.contains(needle), "{text:?} -> {e}");
         }
+    }
+
+    #[test]
+    fn hostile_format_comments_cannot_overflow() {
+        for header in [
+            ";FILE_FORMAT=255:1",
+            ";FILE_FORMAT=250:10",
+            ";FILE_FORMAT=0:0",
+            ";FILE_FORMAT=13:0",
+        ] {
+            let text = format!("M48\n{header}\nMETRIC,TZ\nT1C1.0\n%\nT1\nX12345Y1\nM30");
+            let d = parse(&text, "f").unwrap(); // ignored, falls back to the 3:3 default
+            assert!(close(d.holes[0].pos.x, 12.345), "{header}");
+        }
+        let zeros = format!(
+            "M48\nMETRIC,{}.{}\nT1C1\n%\nT1\nX12345\nM30",
+            "0".repeat(200),
+            "0".repeat(200)
+        );
+        assert!(close(parse(&zeros, "f").unwrap().holes[0].pos.x, 12.345));
+    }
+
+    #[test]
+    fn repeat_commands_are_rejected_not_misread() {
+        let e = parse("M48\nMETRIC\nT1C1.0\n%\nT1\nX110.0Y60.0\nR3X2.54Y0\n", "f").unwrap_err();
+        assert!(e.to_string().contains("repeat commands"), "{e}");
     }
 
     #[test]

@@ -74,11 +74,15 @@ pub fn classify(file_name: &str) -> Option<Kind> {
     }
     let ext = name.rsplit_once('.').map_or("", |(_, e)| e);
     let has = |words: &[&str]| words.iter().any(|w| name.contains(w));
+    // whole-word matching for drill files, so "Olivia_PTH.DRL" is not a "via" file
+    let stem = name.rsplit_once('.').map_or(name.as_str(), |(s, _)| s);
+    let words: Vec<&str> = stem.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    let word = |w: &str| words.contains(&w);
     match ext {
-        "drl" | "xln" | "drd" | "txt" if ext != "txt" || has(&["drill", "pth"]) => {
-            if has(&["npth", "non-plated", "nonplated", "non_plated"]) {
+        "drl" | "xln" | "drd" | "txt" if ext != "txt" || word("drill") || word("pth") => {
+            if word("npth") || word("nonplated") || (word("non") && word("plated")) {
                 Some(Kind::NonPlated)
-            } else if has(&["via"]) {
+            } else if word("via") || word("vias") {
                 Some(Kind::Via)
             } else {
                 Some(Kind::Plated)
@@ -208,6 +212,7 @@ impl Package {
             .filter(|e| e.kind == Kind::Plated || (options.include_vias && e.kind == Kind::Via))
             .map(&mut load)
             .collect::<Result<Vec<_>>>()?;
+        let plated = drop_non_excellon_text(plated);
         if plated.is_empty() {
             return Err(Error::MissingLayer {
                 what: "plated through-hole drill file",
@@ -215,11 +220,13 @@ impl Package {
                 hint: "Drill_PTH_Through.DRL",
             });
         }
-        let non_plated = entries
-            .iter()
-            .filter(|e| e.kind == Kind::NonPlated)
-            .map(&mut load)
-            .collect::<Result<Vec<_>>>()?;
+        let non_plated = drop_non_excellon_text(
+            entries
+                .iter()
+                .filter(|e| e.kind == Kind::NonPlated)
+                .map(&mut load)
+                .collect::<Result<Vec<_>>>()?,
+        );
         let pick_and_place = entries
             .iter()
             .find(|e| e.kind == Kind::PickAndPlace)
@@ -233,6 +240,22 @@ impl Package {
             pick_and_place,
         })
     }
+}
+
+/// `.txt` is a weak signal for a drill file: keep such a file only if it looks like Excellon,
+/// so a stray notes file cannot abort an otherwise valid package.
+fn drop_non_excellon_text(layers: Vec<Layer>) -> Vec<Layer> {
+    layers
+        .into_iter()
+        .filter(|l| {
+            if !l.name.to_ascii_lowercase().ends_with(".txt") {
+                return true;
+            }
+            let head =
+                String::from_utf8_lossy(&l.bytes[..l.bytes.len().min(2048)]).to_ascii_uppercase();
+            head.contains("M48") || head.contains("METRIC") || head.contains("INCH")
+        })
+        .collect()
 }
 
 fn walk(dir: &Path, depth: usize, out: &mut Vec<Entry>) -> Result<()> {
@@ -286,6 +309,11 @@ mod tests {
             ("Drill_PTH_Through.DRL", Some(Plated)),
             ("Drill_NPTH_Through.DRL", Some(NonPlated)),
             ("Drill_PTH_Through_Via.DRL", Some(Via)),
+            ("Olivia_PTH_Through.DRL", Some(Plated)),
+            ("Drill_Non-Plated.drl", Some(NonPlated)),
+            ("drill_notes_for_ops.txt", Some(Plated)),
+            ("readme_pth.txt", Some(Plated)),
+            ("notes.txt", None),
             ("PickAndPlace_PCB1_2024.csv", Some(PickAndPlace)),
             ("board.gm1", Some(Outline)),
             ("Board-Edge_Cuts.gbr", Some(Outline)),

@@ -36,6 +36,10 @@ struct HolesArgs {
     /// Also list via drill files (`*Via*.DRL`).
     #[arg(long)]
     include_vias: bool,
+    /// Settings file; only `include_vias` matters here, but passing the same file as to
+    /// `generate` guarantees both commands number the holes identically.
+    #[arg(short, long, value_name = "FILE")]
+    config: Option<PathBuf>,
 }
 
 #[derive(Debug, Args)]
@@ -152,9 +156,17 @@ impl GenerateArgs {
 fn run(cli: Cli) -> ict_jig_gen::Result<()> {
     match cli.command {
         Command::Holes(args) => {
+            let from_config = match &args.config {
+                Some(path) => ConfigFile::load(path)?.include_vias.unwrap_or(false),
+                None => false,
+            };
             print!(
                 "{}",
-                app::list_holes(&args.input, args.pnp.as_deref(), args.include_vias)?
+                app::list_holes(
+                    &args.input,
+                    args.pnp.as_deref(),
+                    args.include_vias || from_config
+                )?
             );
         }
         Command::Generate(args) => {

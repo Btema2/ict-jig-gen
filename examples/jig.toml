@@ -1,7 +1,7 @@
 # Example settings for `ict-jig-gen generate --config examples/jig.toml ...`
 # Every key is optional; command-line flags override this file.
 
-pogo = "P75-LM2"          # or "P100-E2"; set barrel_diameter/pogo_length/pogo_stroke for others
+pogo = "P75-LM2"          # or "P100-E2"; a custom name needs barrel_diameter + pogo_length + pogo_stroke
 clearance = 0.15          # extra hole diameter for FDM tolerance (mm)
 plate_thickness = 3.0     # each guide plate (mm)
 standoff_height = 8.0     # gap between the plates (mm)
