@@ -1,0 +1,25 @@
+# Build output
+/target
+
+# Per-user agent state (the committed .claude/settings.json is shared)
+.claude/settings.local.json
+.claude/worktrees/
+CLAUDE.local.md
+AGENTS.local.md
+
+# Generated scratch artifacts: meshes and rendered previews are never committed
+*.stl
+*.png
+/out/
+/preview*
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+
+# Secrets
+.env
+.env.*
