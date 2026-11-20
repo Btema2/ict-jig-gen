@@ -6,12 +6,13 @@ use crate::board::Board;
 use crate::cassette::{self, Cassette};
 use crate::config::{ConfigFile, ImageSize, Settings};
 use crate::error::{Error, Result};
+use crate::mesh::Mesh;
 use crate::package::{OpenOptions, Package};
 use crate::pinmap::{ListaElementow, PinMap};
 use crate::{pnp, report, stl};
 
-/// File names written into the output directory.
-pub const STL_NAME: &str = "cassette.stl";
+pub use crate::cassette::{STL_BOTTOM_NAME, STL_NAME, STL_TOP_NAME};
+/// Output file names: see [`STL_NAME`] and the split pair.
 /// Pin-map file consumed by the companion app.
 pub const JSON_NAME: &str = "lista_elementow.json";
 /// Human-readable wiring guide.
@@ -33,8 +34,9 @@ pub struct GenerateRequest {
 /// Everything [`generate`] produced.
 #[derive(Debug)]
 pub struct Outputs {
-    /// Written STL.
-    pub stl_path: PathBuf,
+    /// Written STL files, in the order of `cassette.solids.files()`: `cassette.stl`, or
+    /// `cassette_bottom.stl` then `cassette_top.stl` with `--split`.
+    pub stl_paths: Vec<PathBuf>,
     /// Written pin map.
     pub json_path: PathBuf,
     /// Written wiring guide.
@@ -77,13 +79,18 @@ pub fn generate(req: &GenerateRequest) -> Result<Outputs> {
     let lista = pin_map.to_lista(&board.bbox, size)?;
 
     let mut warnings = board.warnings.clone();
+    warnings.extend(stale_output_warning(&req.out_dir, settings.mech.split));
     warnings.extend(pin_map.warnings.iter().cloned());
     warnings.extend(cassette.warnings.iter().cloned());
     warnings.extend(aspect_warning(&board, size));
 
     let guide = report::wiring_guide(&board, &pin_map, &cassette, &settings.mech, &warnings);
-    let mut stl_bytes = Vec::new();
-    stl::write(&cassette.mesh, &mut stl_bytes).map_err(|e| Error::io(&req.out_dir, e))?;
+    let stl_files = cassette
+        .solids
+        .files()
+        .into_iter()
+        .map(|(name, mesh)| Ok((name, encode_stl(mesh, &req.out_dir)?)))
+        .collect::<Result<Vec<_>>>()?;
     let json = lista.to_json()?;
 
     std::fs::create_dir_all(&req.out_dir).map_err(|e| Error::io(&req.out_dir, e))?;
@@ -92,8 +99,12 @@ pub fn generate(req: &GenerateRequest) -> Result<Outputs> {
         std::fs::write(&path, data).map_err(|e| Error::io(&path, e))?;
         Ok(path)
     };
+    let stl_paths = stl_files
+        .iter()
+        .map(|(name, bytes)| put(name, bytes))
+        .collect::<Result<Vec<_>>>()?;
     Ok(Outputs {
-        stl_path: put(STL_NAME, &stl_bytes)?,
+        stl_paths,
         json_path: put(JSON_NAME, json.as_bytes())?,
         guide_path: put(GUIDE_NAME, guide.as_bytes())?,
         guide,
@@ -103,6 +114,35 @@ pub fn generate(req: &GenerateRequest) -> Result<Outputs> {
         lista,
         warnings,
     })
+}
+
+/// Files from the other output mode that an earlier run left in `out_dir`; they are not
+/// touched, but they no longer match the new guide and JSON.
+fn stale_output_warning(out_dir: &Path, split: bool) -> Option<String> {
+    let stale: &[&str] = if split {
+        &[STL_NAME]
+    } else {
+        &[STL_BOTTOM_NAME, STL_TOP_NAME]
+    };
+    let found: Vec<&str> = stale
+        .iter()
+        .copied()
+        .filter(|name| out_dir.join(name).exists())
+        .collect();
+    (!found.is_empty()).then(|| {
+        format!(
+            "{} from an earlier run in the other output mode is still in {}; it is not part of \
+             this run, delete it before printing or previewing",
+            found.join(", "),
+            out_dir.display()
+        )
+    })
+}
+
+fn encode_stl(mesh: &Mesh, out_dir: &Path) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    stl::write(mesh, &mut bytes).map_err(|e| Error::io(out_dir, e))?;
+    Ok(bytes)
 }
 
 /// Listing of candidate probe holes (the `holes` command).

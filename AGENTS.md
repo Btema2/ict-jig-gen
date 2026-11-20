@@ -52,7 +52,10 @@ Treat input as untrusted: malformed or missing files are errors, never panics.
 
 ## 3D output rules
 
-- Two-layer cassette in one STL. Units are millimetres. Z is up (print orientation).
+- Two-layer cassette in one STL (`cassette.stl`). Units are millimetres. Z is up (print orientation).
+- `--split` / `split = true` instead writes `cassette_bottom.stl` + `cassette_top.stl`, each
+  watertight, on `Z = 0`, with no downward-facing surface above the bed (no supports), joined by
+  4x M3 screws into locating bosses. Never write `cassette.stl` in that mode.
 - Mesh must be watertight/manifold. Pogo holes must fit the barrel (1.02 mm default).
 - Any change to cassette geometry requires the `verify-stl` skill before claiming success.
 

@@ -305,7 +305,7 @@ fn more_than_sixteen_holes_need_an_explicit_selection() {
     assert_eq!(out.cassette.layout.holes.len(), 16);
     assert_eq!(out.pin_map.probes.last().unwrap().pin, 15);
     // 16 probes among 20 holes: only the chosen holes are drilled in the cassette
-    let mesh = common::read_stl(&out.stl_path);
+    let mesh = common::read_stl(&out.stl_paths[0]);
     assert!(mesh.topology().is_watertight());
 }
 
@@ -664,4 +664,61 @@ fn example_config_file_loads_and_runs_on_the_fixture() {
             .iter()
             .any(|e| e.nazwa == "VCC-GND" && e.piny == [14, 15])
     );
+}
+
+#[test]
+fn cli_split_flag_and_config_key_write_two_halves() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |extra: &[&str], out: &std::path::Path| {
+        let o = cli()
+            .arg("generate")
+            .arg(demo_zip())
+            .arg("--pnp")
+            .arg(demo_pnp())
+            .args(extra)
+            .arg("-o")
+            .arg(out)
+            .output()
+            .unwrap();
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        String::from_utf8(o.stdout).unwrap()
+    };
+    // flag
+    let by_flag = dir.path().join("flag");
+    let stdout = run(&["--split"], &by_flag);
+    assert!(stdout.contains("cassette_bottom.stl") && stdout.contains("cassette_top.stl"));
+    assert!(!by_flag.join("cassette.stl").exists());
+    // config key
+    let cfg = dir.path().join("jig.toml");
+    std::fs::write(&cfg, "split = true\n").unwrap();
+    let by_cfg = dir.path().join("cfg");
+    run(&["--config", cfg.to_str().unwrap()], &by_cfg);
+    for half in ["cassette_bottom.stl", "cassette_top.stl"] {
+        assert!(
+            common::read_stl(&by_cfg.join(half))
+                .topology()
+                .is_watertight()
+        );
+    }
+    assert!(!by_cfg.join("cassette.stl").exists());
+    // --no-split overrides the file, and the two flags exclude each other
+    let by_no_flag = dir.path().join("noflag");
+    run(
+        &["--config", cfg.to_str().unwrap(), "--no-split"],
+        &by_no_flag,
+    );
+    assert!(by_no_flag.join("cassette.stl").exists());
+    assert!(!by_no_flag.join("cassette_top.stl").exists());
+    let both = cli()
+        .arg("generate")
+        .arg(demo_zip())
+        .args(["--split", "--no-split"])
+        .output()
+        .unwrap();
+    assert!(!both.status.success());
+    // default
+    let plain = dir.path().join("plain");
+    run(&[], &plain);
+    assert!(plain.join("cassette.stl").exists());
+    assert!(!plain.join("cassette_top.stl").exists());
 }

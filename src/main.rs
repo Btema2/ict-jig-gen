@@ -20,7 +20,7 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Write cassette.stl, lista_elementow.json and wiring_guide.txt.
+    /// Write cassette.stl (or the --split halves), lista_elementow.json and wiring_guide.txt.
     Generate(Box<GenerateArgs>),
     /// List the plated holes (with H-ids) that can be assigned to multiplexer pins.
     Holes(HolesArgs),
@@ -110,6 +110,13 @@ struct GenerateArgs {
     /// How the board is located: auto, posts, lip, both or none.
     #[arg(long, value_name = "MODE")]
     alignment: Option<Alignment>,
+    /// Write two flat-printable halves (cassette_bottom.stl, cassette_top.stl) joined by four M3
+    /// screws, so no FDM supports are needed, instead of one cassette.stl.
+    #[arg(long)]
+    split: bool,
+    /// Write one combined cassette.stl even if the config file sets split = true.
+    #[arg(long, conflicts_with = "split")]
+    no_split: bool,
 
     /// Take the pixel size from an existing board image (PNG/JPEG).
     #[arg(long, value_name = "FILE")]
@@ -143,6 +150,11 @@ impl GenerateArgs {
             pcb_thickness: self.pcb_thickness,
             lip_height: self.lip_height,
             alignment: self.alignment,
+            split: match (self.split, self.no_split) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            },
             image: self.image.clone(),
             image_size: self.image_size.map(|s| format!("{}x{}", s.width, s.height)),
             include_vias: self.include_vias.then_some(true),
@@ -182,10 +194,17 @@ fn run(cli: Cli) -> ict_jig_gen::Result<()> {
                 config,
             })?;
             print!("{}", out.guide);
+            let stls: Vec<String> = out
+                .stl_paths
+                .iter()
+                .zip(out.cassette.solids.files())
+                .map(|(path, (_, mesh))| {
+                    format!("{} ({} triangles)", path.display(), mesh.triangle_count())
+                })
+                .collect();
             println!(
-                "\nWrote {} ({} triangles), {} ({} entries), {}",
-                out.stl_path.display(),
-                out.cassette.mesh.triangle_count(),
+                "\nWrote {}, {} ({} entries), {}",
+                stls.join(", "),
                 out.json_path.display(),
                 out.lista.elementy.len(),
                 out.guide_path.display()
