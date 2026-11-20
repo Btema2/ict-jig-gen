@@ -148,3 +148,7 @@ just check            # fmt-check + clippy -D warnings + tests: the one verifica
 just fmt
 just preview <stl>    # isometric render with f3d (see the verify-stl skill)
 ```
+
+## License
+
+GPL-2.0-only, the same licence as the Linux kernel. See [LICENSE](LICENSE).

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Generate 3D-printable ICT pogo-pin test cassettes from EasyEDA Gerber/Excellon packages"
+license = "GPL-2.0-only"
 publish = false
 
 [dependencies]
