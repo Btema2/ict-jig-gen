@@ -1,0 +1,40 @@
+# Example settings for `ict-jig-gen generate --config examples/jig.toml ...`
+# Every key is optional; command-line flags override this file.
+
+pogo = "P75-LM2"          # or "P100-E2"; set barrel_diameter/pogo_length/pogo_stroke for others
+clearance = 0.15          # extra hole diameter for FDM tolerance (mm)
+plate_thickness = 3.0     # each guide plate (mm)
+standoff_height = 8.0     # gap between the plates (mm)
+margin = 8.0              # plate overhang around the board outline (mm)
+alignment = "auto"        # auto | posts | lip | both | none
+image_size = "512x512"    # pixel size of zdjecie_plytki.png (or: image = "zdjecie_plytki.png")
+
+# Explicit pin assignment. When any [[probe]] is present, automatic selection is off, so this
+# is how you handle boards with more than 16 plated holes. `at` is a hole id from
+# `ict-jig-gen holes` (H3), a component pad (R1.2) or board coordinates in mm ([112.46, 80.0]).
+[[probe]]
+pin = 0
+at = "R1.1"
+
+[[probe]]
+pin = 1
+at = "R1.2"
+
+[[probe]]
+pin = 14
+at = "J1.1"
+label = "VCC"
+
+[[probe]]
+pin = 15
+at = "J1.2"
+label = "GND"
+
+# Elements for lista_elementow.json. Components with exactly two probed pads (R1, and the J1
+# header here) are added automatically; add rails and anything else here. An entry with the
+# same name as an automatic one replaces it (name this one "J1" to drop the extra J1 element),
+# and `auto_elements = false` at the top switches the automatic ones off.
+[[element]]
+name = "VCC-GND"
+pins = [14, 15]
+typ = "linia"
