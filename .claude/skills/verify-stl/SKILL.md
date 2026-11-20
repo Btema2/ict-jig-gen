@@ -30,6 +30,9 @@ just preview     out/cassette.stl out/iso.png   # isometric, Z up
 just preview-top out/cassette.stl out/top.png   # looking down -Z: X axis up, Y axis left
 ```
 
+With `--split`, render both halves (`out/cassette_bottom.stl`, `out/cassette_top.stl`) and
+check each is on Z = 0 and has no downward-facing triangle above the bed.
+
 If `just preview` fails, read the error. Do not add `--rendering-backend` (egl/osmesa/glx
 are unavailable here; the default backend works headless).
 

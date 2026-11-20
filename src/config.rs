@@ -118,6 +118,8 @@ pub struct Mechanical {
     pub alignment: Alignment,
     /// Polygon segments per circle.
     pub circle_segments: usize,
+    /// Emit two flat-printable halves joined by M3 screws instead of one combined solid.
+    pub split: bool,
 }
 
 impl Default for Mechanical {
@@ -138,6 +140,7 @@ impl Default for Mechanical {
             lip_height: 1.0,
             alignment: Alignment::Auto,
             circle_segments: 32,
+            split: false,
         }
     }
 }
@@ -380,6 +383,9 @@ pub struct ConfigFile {
     pub lip_height: Option<f64>,
     /// Alignment strategy.
     pub alignment: Option<Alignment>,
+    /// Write `cassette_bottom.stl` + `cassette_top.stl` (print flat, no supports) instead of
+    /// one `cassette.stl`.
+    pub split: Option<bool>,
     /// Existing board image to take pixel dimensions from.
     pub image: Option<PathBuf>,
     /// Explicit `WxH` (wins over `image`).
@@ -429,6 +435,7 @@ impl ConfigFile {
             pcb_thickness,
             lip_height,
             alignment,
+            split,
             include_vias,
             auto_elements
         );
@@ -516,6 +523,7 @@ impl Settings {
         if let Some(a) = cfg.alignment {
             mech.alignment = a;
         }
+        mech.split = cfg.split.unwrap_or(false);
         mech.validate()?;
 
         let image = match (&cfg.image_size, &cfg.image) {
@@ -690,6 +698,21 @@ mod tests {
         assert_eq!(cfg.probe[1].at, PadRef::Xy([112.5, 80.0]));
         assert_eq!(cfg.element[0].typ, Typ::Linia);
         assert!(toml::from_str::<ConfigFile>("clearence = 1").is_err());
+    }
+
+    #[test]
+    fn split_is_off_by_default_and_follows_file_then_flag() {
+        assert!(!Settings::resolve(ConfigFile::default()).unwrap().mech.split);
+        let mut cfg: ConfigFile = toml::from_str("split = true").unwrap();
+        assert!(Settings::resolve(cfg.clone()).unwrap().mech.split);
+        // an absent command-line value leaves the file's choice alone
+        cfg.overlay(ConfigFile::default());
+        assert_eq!(cfg.split, Some(true));
+        cfg.overlay(ConfigFile {
+            split: Some(false),
+            ..ConfigFile::default()
+        });
+        assert!(!Settings::resolve(cfg).unwrap().mech.split);
     }
 
     #[test]

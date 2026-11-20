@@ -59,6 +59,8 @@ just preview out/cassette.stl out/iso.png        # needs f3d
 just preview-top out/cassette.stl out/top.png
 ```
 
+With `--split -o out`, preview `out/cassette_bottom.stl` and `out/cassette_top.stl` the same way.
+
 `tests/fixtures/gen_fixture.py` regenerates the fixture: a 60 x 40 mm board, 4 mounting holes
 and 13 plated pads (R1, R2, D1, D2, a 3-pin U1, a 2-pin power header J1).
 
@@ -97,6 +99,7 @@ footprint and pin the pads down with `H<n>` instead.
 | `--lip-height` | 1 | height of the registration lip |
 | `--pcb-thickness` | 1.6 | sets alignment-post height |
 | `--alignment` | `auto` | `auto`, `posts`, `lip`, `both`, `none` |
+| `--split` (`split = true`) | off | write `cassette_bottom.stl` + `cassette_top.stl` that print flat without supports, joined by 4 M3 screws (see [Split mode](#split-mode-print-without-supports)) |
 | `--image` / `--image-size` | `512x512` | pixel size for the JSON; `--image` reads a PNG/JPEG header, `--image-size WxH` wins |
 
 ## What the cassette looks like
@@ -121,15 +124,58 @@ origin at the lower-left corner of the footprint (board bounding box + margin).
   P75-LM2; 2.31 mm for P100-E2), holes that would clash with posts, pillars or the lip, and warns
   when the plate stack is too tall for the plunger to rise by its stroke above the top plate.
 * **Printing:** the top plate bridges the open cavity, so print with support enabled (the cavity
-  is open on all sides, so supports can be removed and wires routed out sideways). The mesh is
+  is open on all sides, so supports can be removed and wires routed out sideways), or use
+  `--split` to avoid supports altogether. The mesh is
   checked to be watertight before it is written (generation fails otherwise) and every
   coordinate is in millimetres.
 * Holes are circumscribed polygons (32 segments), so the printed bore is never narrower than
   barrel + clearance. Calibrate `--clearance` for your printer and material.
 
+## Split mode: print without supports
+
+The one-piece cassette bridges the open cavity with its top plate, which needs supports.
+`--split` (or `split = true` in the config file) writes two parts instead, and each lies flat on
+`Z = 0` with nothing hanging in the air:
+
+```bash
+ict-jig-gen generate board_gerber.zip --pnp PickAndPlace_board.csv --split -o out
+# out/cassette_bottom.stl  out/cassette_top.stl  (no cassette.stl)
+```
+
+| File | Contents | Print as exported |
+|---|---|---|
+| `cassette_bottom.stl` | bottom plate with the pogo bores, the perimeter pillars, a locating boss with a pilot hole on each of the 4 corner pillars | plate on the bed, pillars up |
+| `cassette_top.stl` | top plate with the same pogo bores, 4 through-sockets over the corner pillars, alignment posts (or the registration lip) | underside on the bed, posts/lip up |
+
+Both parts keep the cassette's XY frame, so the bores line up one-to-one. Do not rotate or
+flip either file; the top plate is already in its print orientation.
+
+**Hardware:** 4x M3 screws, pan, button or cap head (head up to 5.7 mm across). The length is
+chosen for the pillar height and printed in `wiring_guide.txt`: **M3 x 10 mm** with the default
+3 mm plates and 8 mm gap. No nuts: the screws cut their own thread in the 2.6 mm pilot holes.
+
+**Joint:** each corner pillar carries a round boss (4.0 mm) that stands up through a socket in
+the top plate, which locates the two plates concentrically; the socket is boss + `--clearance`,
+the same slip fit as the pogo bores, so calibrate `--clearance` once for both. The screw goes
+through the top plate into the boss and clamps the plates together. With the default 3 mm plates the boss stops 1 mm below
+the plate surface so the screw head, not the boss, bears on the plate. The lower-left boss is
+larger (4.4 mm), so the top plate fits only one way round.
+
+**Assembly:**
+
+1. Print both files as exported, without supports.
+2. Fit the pogo pins and wires into the bottom part (`wiring_guide.txt` has the table).
+3. Lower the top part onto the pillars, bores over the pogo barrels, bosses into the sockets.
+4. Drive one M3 screw through each corner of the top plate. Snug is enough; do not overtighten PLA.
+
+**Notes:** with a registration lip (boards without mounting holes) the margin is raised to
+9.15 mm if needed so the screw heads clear the lip, and a warning says so. A warning is also
+printed when the pillars are too short for a reliable M3 thread (increase `--standoff-height`).
+
 ## Output files
 
-* `cassette.stl`: binary STL, Z up.
+* `cassette.stl`: binary STL, Z up. With `--split` it is replaced by `cassette_bottom.stl` and
+  `cassette_top.stl` (see above).
 * `lista_elementow.json`: `{ "elementy": [ {"nazwa","piny":[a,b],"x","y","typ"} ] }` with integer
   pixels, origin top-left, Y flipped from the Gerber frame, mapped linearly from the outline
   bounding box to the image size. `typ` is `"element"` or `"linia"`. Contract details are in

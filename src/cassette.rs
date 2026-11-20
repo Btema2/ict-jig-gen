@@ -19,6 +19,10 @@
 //! removing support material. The board rests on the top plate and is located either by
 //! posts that enter its mounting holes or by a low lip around its outline.
 //!
+//! With `split` the same cassette is emitted as two parts that each print flat on `Z = 0`
+//! without supports (see [`Joint`]): the bottom plate with its pillars, and the top plate
+//! turned over to its natural print orientation (underside on the bed, posts / lip up).
+//!
 //! Coordinates: the cassette origin is the lower-left corner of the footprint; board
 //! coordinates map in with a pure translation (no mirroring: the board lies component-side up
 //! on the cassette, probes touch its underside pads).
@@ -49,6 +53,27 @@ const POST_TIP_HEIGHT: f64 = 0.8;
 /// Extra distance between a feature and the lip wall.
 const LIP_FEATURE_GAP: f64 = 0.4;
 
+/// Pilot hole in each fastening boss, sized for a thread-forming M3 screw in PLA.
+pub const SCREW_PILOT_DIAMETER: f64 = 2.6;
+/// Diameter of the locating boss on a plain corner pillar (pilot + 0.7 mm walls).
+pub const BOSS_DIAMETER: f64 = 4.0;
+/// Diameter of the keyed boss (lower-left corner): too big for the other sockets, so the top
+/// half only fits one way round.
+pub const KEYED_BOSS_DIAMETER: f64 = 4.4;
+/// Longest locating boss.
+const BOSS_MAX_HEIGHT: f64 = 2.0;
+/// The boss stops at least this far below the top-plate surface, so the screw head clamps the
+/// plate instead of the boss.
+const BOSS_RECESS: f64 = 0.5;
+/// Largest M3 head allowed for (pan, button and cap heads are 5.5..5.7 mm).
+pub const SCREW_HEAD_DIAMETER: f64 = 5.7;
+/// The screw tip stays this far above the floor of the pilot hole.
+const PILOT_FLOOR_GAP: f64 = 1.0;
+/// Fewer mm of thread in the bosses than this earns a warning.
+const MIN_SCREW_ENGAGEMENT: f64 = 4.0;
+/// Standard M3 screw lengths, mm, ascending.
+const SCREW_LENGTHS: [u32; 8] = [6, 8, 10, 12, 16, 20, 25, 30];
+
 /// An alignment post.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Post {
@@ -76,6 +101,57 @@ impl Rect {
 
     fn ring(&self) -> Vec<P2> {
         rect([self.min.x, self.min.y], [self.max.x, self.max.y])
+    }
+
+    fn contains(&self, p: Point) -> bool {
+        self.distance_to(p) == 0.0
+    }
+}
+
+/// One M3 fastening point of a split cassette: a locating boss on a bottom-half corner pillar
+/// with a pilot hole for the screw, and a matching through-socket in the top half.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Fastener {
+    /// Centre in cassette coordinates (the top and bottom halves share the XY frame).
+    pub center: Point,
+    /// The lower-left fastener has the larger boss, so the top half cannot be fitted rotated.
+    pub keyed: bool,
+}
+
+impl Fastener {
+    /// Boss diameter on the bottom half.
+    pub fn boss_diameter(&self) -> f64 {
+        if self.keyed {
+            KEYED_BOSS_DIAMETER
+        } else {
+            BOSS_DIAMETER
+        }
+    }
+}
+
+/// How the two halves of a `--split` cassette are joined.
+///
+/// Both halves print flat on `Z = 0` (every downward-facing surface is on the bed). In the
+/// assembled cassette the top half sits `z_top_plate_bottom` higher than it prints.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Joint {
+    /// Bosses / screws, one per corner pillar.
+    pub fasteners: Vec<Fastener>,
+    /// Boss height above the pillar top. It fills the socket for this much of the plate
+    /// thickness and stops short of the plate surface.
+    pub boss_height: f64,
+    /// Pilot hole depth, measured down from the boss top to the pillar base.
+    pub pilot_depth: f64,
+    /// Socket diameter = boss diameter + this (the same slip-fit allowance as the pogo bores).
+    pub socket_clearance: f64,
+    /// Longest standard M3 screw that fits the pilot hole, if any does.
+    pub screw_length: Option<u32>,
+}
+
+impl Joint {
+    /// Diameter of the socket cut through the top plate for `f`.
+    pub fn socket_diameter(&self, f: &Fastener) -> f64 {
+        f.boss_diameter() + self.socket_clearance
     }
 }
 
@@ -106,13 +182,39 @@ pub struct Layout {
     pub pocket: Option<Rect>,
     /// Support pillars.
     pub pillars: Vec<Rect>,
+    /// Screw joint between the halves (only with `split`).
+    pub joint: Option<Joint>,
+}
+
+/// The printable solid(s).
+#[derive(Debug, Clone)]
+pub enum Solids {
+    /// One combined cassette in assembled orientation.
+    Single(Mesh),
+    /// Two halves, each oriented to print flat on `Z = 0`.
+    Split {
+        /// Bottom guide plate + pillars + locating bosses.
+        bottom: Mesh,
+        /// Top guide plate + posts / lip, printed underside-down.
+        top: Mesh,
+    },
+}
+
+impl Solids {
+    /// The meshes in output order (`[cassette]` or `[bottom, top]`).
+    pub fn meshes(&self) -> Vec<&Mesh> {
+        match self {
+            Self::Single(m) => vec![m],
+            Self::Split { bottom, top } => vec![bottom, top],
+        }
+    }
 }
 
 /// Generated cassette.
 #[derive(Debug, Clone)]
 pub struct Cassette {
-    /// The solid.
-    pub mesh: Mesh,
+    /// The solid(s).
+    pub solids: Solids,
     /// Where everything is.
     pub layout: Layout,
     /// Non-fatal observations.
@@ -125,30 +227,31 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
         return Err(Error::Geometry("no probe points selected".into()));
     }
     let mut warnings = Vec::new();
-    let offset = Point::new(
-        mech.margin - board.bbox.min.x,
-        mech.margin - board.bbox.min.y,
-    );
+    let (mut posts, use_lip) = plan_alignment(board, mech, &mut warnings)?;
+    let margin = effective_margin(mech, use_lip, &mut warnings);
+    let offset = Point::new(margin - board.bbox.min.x, margin - board.bbox.min.y);
     let to_cassette = |p: Point| Point::new(p.x + offset.x, p.y + offset.y);
+    for post in &mut posts {
+        post.center = to_cassette(post.center);
+    }
     let (width, depth) = (
-        board.bbox.width() + 2.0 * mech.margin,
-        board.bbox.height() + 2.0 * mech.margin,
+        board.bbox.width() + 2.0 * margin,
+        board.bbox.height() + 2.0 * margin,
     );
 
     let holes: Vec<Point> = probes.iter().map(|p| to_cassette(p.hole.pos)).collect();
-    let (posts, use_lip) = plan_alignment(board, mech, &to_cassette, &mut warnings)?;
     let pocket = use_lip.then(|| {
-        let min = Point::new(
-            mech.margin - POCKET_CLEARANCE,
-            mech.margin - POCKET_CLEARANCE,
-        );
+        let min = Point::new(margin - POCKET_CLEARANCE, margin - POCKET_CLEARANCE);
         let max = Point::new(
-            width - mech.margin + POCKET_CLEARANCE,
-            depth - mech.margin + POCKET_CLEARANCE,
+            width - margin + POCKET_CLEARANCE,
+            depth - margin + POCKET_CLEARANCE,
         );
         Rect { min, max }
     });
     let pillars = plan_pillars(width, depth);
+    let joint = mech
+        .split
+        .then(|| plan_joint(width, depth, mech, &mut warnings));
 
     let z1 = mech.plate_thickness;
     let z2 = z1 + mech.standoff_height;
@@ -173,28 +276,92 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
         posts,
         pocket,
         pillars,
+        joint,
     };
     check_clearances(&layout, probes, mech)?;
     stack_up_warning(mech, &mut warnings);
 
-    let solid = assemble(&layout, mech)?;
-    let topology = solid.topology();
-    if !topology.is_watertight() {
-        return Err(Error::Geometry(format!(
-            "internal error: generated mesh is not watertight ({topology:?}); refusing to write it"
-        )));
+    let solids = assemble(&layout, mech)?;
+    for mesh in solids.meshes() {
+        let topology = mesh.topology();
+        if !topology.is_watertight() {
+            return Err(Error::Geometry(format!(
+                "internal error: generated mesh is not watertight ({topology:?}); refusing to write it"
+            )));
+        }
     }
     Ok(Cassette {
-        mesh: solid,
+        solids,
         layout,
         warnings,
     })
 }
 
+/// The margin to build with: in split mode the M3 screw heads on the corner pillars must stay
+/// clear of the board seat and of the registration lip.
+fn effective_margin(mech: &Mechanical, use_lip: bool, warnings: &mut Vec<String>) -> f64 {
+    if !mech.split {
+        return mech.margin;
+    }
+    let head_reach = PILLAR_INSET + PILLAR_SIZE / 2.0 + SCREW_HEAD_DIAMETER / 2.0;
+    let needed = if use_lip {
+        head_reach + POCKET_CLEARANCE + LIP_WALL
+    } else {
+        head_reach
+    };
+    if mech.margin < needed {
+        warnings.push(format!(
+            "--split with a registration lip needs a {needed:.2} mm margin for the M3 screw heads; \
+             using it instead of {:.2} mm",
+            mech.margin
+        ));
+        return needed;
+    }
+    mech.margin
+}
+
+fn plan_joint(width: f64, depth: f64, mech: &Mechanical, warnings: &mut Vec<String>) -> Joint {
+    let c = PILLAR_INSET + PILLAR_SIZE / 2.0;
+    let fasteners = [
+        (c, c),
+        (width - c, c),
+        (c, depth - c),
+        (width - c, depth - c),
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(i, (x, y))| Fastener {
+        center: Point::new(x, y),
+        keyed: i == 0,
+    })
+    .collect();
+    let plate = mech.plate_thickness;
+    let boss_height = (plate - BOSS_RECESS).min(BOSS_MAX_HEIGHT);
+    let longest = plate + mech.standoff_height - PILOT_FLOOR_GAP;
+    let screw_length = SCREW_LENGTHS
+        .into_iter()
+        .rev()
+        .find(|&l| f64::from(l) <= longest);
+    let engagement = screw_length.map_or(0.0, |l| f64::from(l) - (plate - boss_height));
+    if engagement < MIN_SCREW_ENGAGEMENT {
+        warnings.push(format!(
+            "--split: the pillars are too short for a reliable M3 joint ({engagement:.1} mm of \
+             thread in the bosses, wanted {MIN_SCREW_ENGAGEMENT} mm); increase --standoff-height"
+        ));
+    }
+    Joint {
+        fasteners,
+        boss_height,
+        pilot_depth: boss_height + mech.standoff_height,
+        socket_clearance: mech.clearance,
+        screw_length,
+    }
+}
+
+/// Posts are returned in board coordinates.
 fn plan_alignment(
     board: &Board,
     mech: &Mechanical,
-    to_cassette: &impl Fn(Point) -> Point,
     warnings: &mut Vec<String>,
 ) -> Result<(Vec<Post>, bool)> {
     let eligible: Vec<Post> = board
@@ -202,7 +369,7 @@ fn plan_alignment(
         .iter()
         .filter(|h| h.diameter >= MIN_POST_HOLE_DIAMETER)
         .map(|h| Post {
-            center: to_cassette(h.pos),
+            center: h.pos, // board coordinates; the caller translates
             diameter: h.diameter - mech.clearance,
         })
         .collect();
@@ -352,95 +519,212 @@ fn stack_up_warning(mech: &Mechanical, warnings: &mut Vec<String>) {
     }
 }
 
-fn assemble(l: &Layout, mech: &Mechanical) -> Result<Mesh> {
-    let n = mech.circle_segments;
-    // Holes are circumscribed about the nominal circle so the printed bore is never narrower
-    // than the barrel; posts are inscribed so they never exceed the mounting hole.
-    #[allow(clippy::cast_precision_loss)]
-    let circumscribe = 1.0 / (std::f64::consts::PI / n as f64).cos();
-    let hole_rings: Vec<Vec<P2>> = l
-        .holes
-        .iter()
-        .map(|h| circle([h.x, h.y], l.hole_diameter / 2.0 * circumscribe, n))
-        .collect();
-    let pillar_rings: Vec<Vec<P2>> = l.pillars.iter().map(Rect::ring).collect();
-    let footprint = rect([0.0, 0.0], [l.width, l.depth]);
+/// Polygon rings shared by the single and split builders.
+struct Rings {
+    n: usize,
+    /// Scale that makes an n-gon circumscribe the circle it approximates.
+    circumscribe: f64,
+    footprint: Vec<P2>,
+    holes: Vec<Vec<P2>>,
+    pillars: Vec<Vec<P2>>,
+    posts: Vec<Vec<P2>>,
+}
+
+impl Rings {
+    fn new(l: &Layout, n: usize) -> Self {
+        // Holes are circumscribed about the nominal circle so the printed bore is never
+        // narrower than the barrel; posts are inscribed so they never exceed the mounting hole.
+        #[allow(clippy::cast_precision_loss)]
+        let circumscribe = 1.0 / (std::f64::consts::PI / n as f64).cos();
+        Self {
+            n,
+            circumscribe,
+            footprint: rect([0.0, 0.0], [l.width, l.depth]),
+            holes: l
+                .holes
+                .iter()
+                .map(|h| circle([h.x, h.y], l.hole_diameter / 2.0 * circumscribe, n))
+                .collect(),
+            pillars: l.pillars.iter().map(Rect::ring).collect(),
+            posts: l
+                .posts
+                .iter()
+                .map(|p| circle([p.center.x, p.center.y], p.diameter / 2.0, n))
+                .collect(),
+        }
+    }
+
+    /// The footprint with every pogo bore and the `extra` rings cut out.
+    fn plate(&self, extra: &[Vec<P2>]) -> Region {
+        Region {
+            outer: self.footprint.clone(),
+            holes: self.holes.iter().chain(extra).cloned().collect(),
+        }
+    }
+
+    /// Outer wall and bore walls of a plate between `z0` and `z1`.
+    fn plate_walls(&self, solid: &mut Mesh, extra: &[Vec<P2>], z0: f64, z1: f64) {
+        solid.wall(&self.footprint, z0, z1, true);
+        for h in self.holes.iter().chain(extra) {
+            solid.wall(h, z0, z1, false);
+        }
+    }
+}
+
+fn assemble(l: &Layout, mech: &Mechanical) -> Result<Solids> {
+    let r = Rings::new(l, mech.circle_segments);
+    match &l.joint {
+        None => Ok(Solids::Single(assemble_single(l, mech, &r)?)),
+        Some(joint) => Ok(Solids::Split {
+            bottom: assemble_bottom(l, &r, joint)?,
+            top: assemble_top(l, mech, &r, joint)?,
+        }),
+    }
+}
+
+fn assemble_single(l: &Layout, mech: &Mechanical, r: &Rings) -> Result<Mesh> {
     let (z1, z2, z3) = (
         l.z_bottom_plate_top,
         l.z_top_plate_bottom,
         l.z_top_plate_top,
     );
-
     let mut solid = Mesh::new();
-    let with = |extra: &[Vec<P2>], also: &[Vec<P2>]| Region {
-        outer: footprint.clone(),
-        holes: hole_rings
-            .iter()
-            .chain(extra)
-            .chain(also)
-            .cloned()
-            .collect(),
-    };
-
     // bottom guide plate: z0..z1
-    solid.cap(&with(&[], &[]), 0.0, false)?;
-    solid.wall(&footprint, 0.0, z1, true);
-    for h in &hole_rings {
-        solid.wall(h, 0.0, z1, false);
-    }
+    solid.cap(&r.plate(&[]), 0.0, false)?;
+    r.plate_walls(&mut solid, &[], 0.0, z1);
     // cavity: floor, ceiling and the pillars joining them
-    solid.cap(&with(&pillar_rings, &[]), z1, true)?;
-    solid.cap(&with(&pillar_rings, &[]), z2, false)?;
-    for p in &pillar_rings {
+    solid.cap(&r.plate(&r.pillars), z1, true)?;
+    solid.cap(&r.plate(&r.pillars), z2, false)?;
+    for p in &r.pillars {
         solid.wall(p, z1, z2, true);
     }
     // top guide plate: z2..z3
-    solid.wall(&footprint, z2, z3, true);
-    for h in &hole_rings {
-        solid.wall(h, z2, z3, false);
-    }
-
-    let post_rings: Vec<Vec<P2>> = l
-        .posts
-        .iter()
-        .map(|p| circle([p.center.x, p.center.y], p.diameter / 2.0, n))
-        .collect();
-    match &l.pocket {
-        Some(pocket) => {
-            let inner = pocket.ring();
-            let outer = rect(
-                [pocket.min.x - LIP_WALL, pocket.min.y - LIP_WALL],
-                [pocket.max.x + LIP_WALL, pocket.max.y + LIP_WALL],
-            );
-            let lip_top = z3 + mech.lip_height;
-            solid.cap(
-                &Region {
-                    outer: footprint.clone(),
-                    holes: vec![outer.clone()],
-                },
-                z3,
-                true,
-            )?;
-            let seat = Region {
-                outer: inner.clone(),
-                holes: hole_rings.iter().chain(&post_rings).cloned().collect(),
-            };
-            solid.cap(&seat, z3, true)?;
-            solid.wall(&outer, z3, lip_top, true);
-            solid.wall(&inner, z3, lip_top, false);
-            solid.cap(
-                &Region {
-                    outer,
-                    holes: vec![inner],
-                },
-                lip_top,
-                true,
-            )?;
-        }
-        None => solid.cap(&with(&post_rings, &[]), z3, true)?,
-    }
-    add_posts(&mut solid, l, mech, &post_rings, z3)?;
+    r.plate_walls(&mut solid, &[], z2, z3);
+    add_deck(&mut solid, l, mech, r, z3, &[])?;
     Ok(solid)
+}
+
+/// Bottom half, printed as it stands: plate on the bed, pillars (and bosses) rising from it.
+fn assemble_bottom(l: &Layout, r: &Rings, joint: &Joint) -> Result<Mesh> {
+    let (z1, z2) = (l.z_bottom_plate_top, l.z_top_plate_bottom);
+    let boss_top = z2 + joint.boss_height;
+    let mut solid = Mesh::new();
+    solid.cap(&r.plate(&[]), 0.0, false)?;
+    r.plate_walls(&mut solid, &[], 0.0, z1);
+    solid.cap(&r.plate(&r.pillars), z1, true)?;
+    for (pillar, ring) in l.pillars.iter().zip(&r.pillars) {
+        solid.wall(ring, z1, z2, true);
+        let Some(f) = joint.fasteners.iter().find(|f| pillar.contains(f.center)) else {
+            solid.cap(
+                &Region {
+                    outer: ring.clone(),
+                    holes: vec![],
+                },
+                z2,
+                true,
+            )?;
+            continue;
+        };
+        let c = [f.center.x, f.center.y];
+        let boss = circle(c, f.boss_diameter() / 2.0, r.n);
+        let pilot = circle(c, SCREW_PILOT_DIAMETER / 2.0 * r.circumscribe, r.n);
+        // pillar top (ring around the boss), boss wall and top, then the blind pilot hole
+        solid.cap(
+            &Region {
+                outer: ring.clone(),
+                holes: vec![boss.clone()],
+            },
+            z2,
+            true,
+        )?;
+        solid.wall(&boss, z2, boss_top, true);
+        solid.cap(
+            &Region {
+                outer: boss,
+                holes: vec![pilot.clone()],
+            },
+            boss_top,
+            true,
+        )?;
+        solid.wall(&pilot, z1, boss_top, false);
+        solid.cap(
+            &Region {
+                outer: pilot,
+                holes: vec![],
+            },
+            z1,
+            true,
+        )?;
+    }
+    Ok(solid)
+}
+
+/// Top half in its print orientation: the plate's underside (which meets the pillars) on the
+/// bed, posts / lip on top. That is the assembled orientation shifted down by `z2`.
+fn assemble_top(l: &Layout, mech: &Mechanical, r: &Rings, joint: &Joint) -> Result<Mesh> {
+    let thickness = l.z_top_plate_top - l.z_top_plate_bottom;
+    let sockets: Vec<Vec<P2>> = joint
+        .fasteners
+        .iter()
+        .map(|f| {
+            let radius = joint.socket_diameter(f) / 2.0 * r.circumscribe;
+            circle([f.center.x, f.center.y], radius, r.n)
+        })
+        .collect();
+    let mut solid = Mesh::new();
+    solid.cap(&r.plate(&sockets), 0.0, false)?;
+    r.plate_walls(&mut solid, &sockets, 0.0, thickness);
+    add_deck(&mut solid, l, mech, r, thickness, &sockets)?;
+    Ok(solid)
+}
+
+/// Everything on the top plate's upper face at `z3`: the board seat, registration lip and
+/// alignment posts. `sockets` are extra through-holes in the plate outside the seat.
+fn add_deck(
+    solid: &mut Mesh,
+    l: &Layout,
+    mech: &Mechanical,
+    r: &Rings,
+    z3: f64,
+    sockets: &[Vec<P2>],
+) -> Result<()> {
+    if let Some(pocket) = &l.pocket {
+        let inner = pocket.ring();
+        let outer = rect(
+            [pocket.min.x - LIP_WALL, pocket.min.y - LIP_WALL],
+            [pocket.max.x + LIP_WALL, pocket.max.y + LIP_WALL],
+        );
+        let lip_top = z3 + mech.lip_height;
+        solid.cap(
+            &Region {
+                outer: r.footprint.clone(),
+                holes: std::iter::once(outer.clone())
+                    .chain(sockets.iter().cloned())
+                    .collect(),
+            },
+            z3,
+            true,
+        )?;
+        let seat = Region {
+            outer: inner.clone(),
+            holes: r.holes.iter().chain(&r.posts).cloned().collect(),
+        };
+        solid.cap(&seat, z3, true)?;
+        solid.wall(&outer, z3, lip_top, true);
+        solid.wall(&inner, z3, lip_top, false);
+        solid.cap(
+            &Region {
+                outer,
+                holes: vec![inner],
+            },
+            lip_top,
+            true,
+        )?;
+    } else {
+        let extra: Vec<Vec<P2>> = sockets.iter().chain(&r.posts).cloned().collect();
+        solid.cap(&r.plate(&extra), z3, true)?;
+    }
+    add_posts(solid, l, mech, &r.posts, z3)
 }
 
 fn add_posts(

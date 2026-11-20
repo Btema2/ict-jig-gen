@@ -3,15 +3,20 @@
 use std::path::{Path, PathBuf};
 
 use crate::board::Board;
-use crate::cassette::{self, Cassette};
+use crate::cassette::{self, Cassette, Solids};
 use crate::config::{ConfigFile, ImageSize, Settings};
 use crate::error::{Error, Result};
+use crate::mesh::Mesh;
 use crate::package::{OpenOptions, Package};
 use crate::pinmap::{ListaElementow, PinMap};
 use crate::{pnp, report, stl};
 
-/// File names written into the output directory.
+/// Combined cassette (default mode).
 pub const STL_NAME: &str = "cassette.stl";
+/// Bottom half with `--split`.
+pub const STL_BOTTOM_NAME: &str = "cassette_bottom.stl";
+/// Top half with `--split`.
+pub const STL_TOP_NAME: &str = "cassette_top.stl";
 /// Pin-map file consumed by the companion app.
 pub const JSON_NAME: &str = "lista_elementow.json";
 /// Human-readable wiring guide.
@@ -33,8 +38,9 @@ pub struct GenerateRequest {
 /// Everything [`generate`] produced.
 #[derive(Debug)]
 pub struct Outputs {
-    /// Written STL.
-    pub stl_path: PathBuf,
+    /// Written STL files, in the order of `cassette.solids.meshes()`: `cassette.stl`, or
+    /// `cassette_bottom.stl` then `cassette_top.stl` with `--split`.
+    pub stl_paths: Vec<PathBuf>,
     /// Written pin map.
     pub json_path: PathBuf,
     /// Written wiring guide.
@@ -82,8 +88,13 @@ pub fn generate(req: &GenerateRequest) -> Result<Outputs> {
     warnings.extend(aspect_warning(&board, size));
 
     let guide = report::wiring_guide(&board, &pin_map, &cassette, &settings.mech, &warnings);
-    let mut stl_bytes = Vec::new();
-    stl::write(&cassette.mesh, &mut stl_bytes).map_err(|e| Error::io(&req.out_dir, e))?;
+    let stl_files: Vec<(&str, Vec<u8>)> = match &cassette.solids {
+        Solids::Single(mesh) => vec![(STL_NAME, encode_stl(mesh, &req.out_dir)?)],
+        Solids::Split { bottom, top } => vec![
+            (STL_BOTTOM_NAME, encode_stl(bottom, &req.out_dir)?),
+            (STL_TOP_NAME, encode_stl(top, &req.out_dir)?),
+        ],
+    };
     let json = lista.to_json()?;
 
     std::fs::create_dir_all(&req.out_dir).map_err(|e| Error::io(&req.out_dir, e))?;
@@ -92,8 +103,12 @@ pub fn generate(req: &GenerateRequest) -> Result<Outputs> {
         std::fs::write(&path, data).map_err(|e| Error::io(&path, e))?;
         Ok(path)
     };
+    let stl_paths = stl_files
+        .iter()
+        .map(|(name, bytes)| put(name, bytes))
+        .collect::<Result<Vec<_>>>()?;
     Ok(Outputs {
-        stl_path: put(STL_NAME, &stl_bytes)?,
+        stl_paths,
         json_path: put(JSON_NAME, json.as_bytes())?,
         guide_path: put(GUIDE_NAME, guide.as_bytes())?,
         guide,
@@ -103,6 +118,12 @@ pub fn generate(req: &GenerateRequest) -> Result<Outputs> {
         lista,
         warnings,
     })
+}
+
+fn encode_stl(mesh: &Mesh, out_dir: &Path) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    stl::write(mesh, &mut bytes).map_err(|e| Error::io(out_dir, e))?;
+    Ok(bytes)
 }
 
 /// Listing of candidate probe holes (the `holes` command).
