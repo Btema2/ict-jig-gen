@@ -63,6 +63,8 @@ just preview-top out/cassette.stl out/top.png
 ```
 
 With `--split -o out`, preview `out/cassette_bottom.stl` and `out/cassette_top.stl` the same way.
+Add `--compact` for the board-outline cassette standing on the 4 mounting holes (with `--split`:
+two screwless halves).
 
 `tests/fixtures/gen_fixture.py` regenerates the fixture: a 60 x 40 mm board, 4 mounting holes
 and 13 plated pads (R1, R2, D1, D2, a 3-pin U1, a 2-pin power header J1).
