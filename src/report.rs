@@ -202,24 +202,25 @@ fn compact_section(out: &mut String, cassette: &Cassette, mech: &Mechanical) {
     );
     if let Some(s) = &cassette.savings {
         let (area, default_area) = (l.width * l.depth, s.default_width * s.default_depth);
-        let less = |part: f64, whole: f64| (1.0 - part / whole) * 100.0;
+        // signed: a large --margin can make the compact cassette the bigger one
+        let change = |part: f64, whole: f64| (part / whole - 1.0) * 100.0;
         let _ = writeln!(
             out,
-            "Saving    : footprint {area:.0} mm² vs {default_area:.0} mm² (-{:.0} %), plastic about \
-             {:.1} cm³ vs {:.1} cm³ (-{:.0} %)",
-            less(area, default_area),
+            "Vs default: footprint {area:.0} mm² vs {default_area:.0} mm² ({:+.0} %), plastic about \
+             {:.1} cm³ vs {:.1} cm³ ({:+.0} %)",
+            change(area, default_area),
             s.volume / 1000.0,
             s.default_volume / 1000.0,
-            less(s.volume, s.default_volume)
+            change(s.volume, s.default_volume)
         );
         let _ = writeln!(
             out,
-            "            vs the default {:.2} x {:.2} mm cassette (solid volume, before infill;",
+            "            against the {:.2} x {:.2} mm cassette without --compact (solid volume,",
             s.default_width, s.default_depth
         );
         let _ = writeln!(
             out,
-            "            print time drops roughly in proportion to the plastic)"
+            "            before infill; print time changes roughly in proportion to the plastic)"
         );
     }
     if !mech.split {
@@ -300,7 +301,7 @@ pub fn hole_listing(board: &Board) -> String {
     }
     let _ = writeln!(
         out,
-        "\nMounting holes (alignment posts): {}",
+        "\nMounting holes (alignment posts / --compact pillars; --skip-mounting-hole X,Y leaves one out): {}",
         board.mounting.len()
     );
     for h in &board.mounting {

@@ -15,6 +15,8 @@ const MOUNTING_HOLE_MIN_DIAMETER: f64 = 2.5;
 const OUTSIDE_TOLERANCE_MM: f64 = 1.0;
 /// Two holes closer than this (and equally sized) are the same hole listed twice.
 const DUPLICATE_TOLERANCE_MM: f64 = 0.01;
+/// A `skip_mounting_holes` position names the mounting hole within this distance.
+const SKIP_MATCH_TOLERANCE_MM: f64 = 0.5;
 
 /// Everything known about the board to be tested. All coordinates are board millimetres
 /// (Gerber frame: +Y up).
@@ -77,6 +79,27 @@ impl Board {
             board.set_components(pnp::parse(&layer.bytes, &layer.name)?, &layer.name);
         }
         Ok(board)
+    }
+
+    /// Drop the mounting holes at `points` (board mm, each matched to within 0.5 mm), so they
+    /// get no alignment post or compact pillar. A point that matches no mounting hole is an
+    /// error, so a typo cannot silently keep a post.
+    pub fn skip_mounting_holes(&mut self, points: &[[f64; 2]]) -> Result<()> {
+        let near = |h: &Hole, [x, y]: [f64; 2]| {
+            h.pos.distance(Point::new(x, y)) <= SKIP_MATCH_TOLERANCE_MM
+        };
+        if let Some([x, y]) = points
+            .iter()
+            .find(|&&p| !self.mounting.iter().any(|h| near(h, p)))
+        {
+            return Err(Error::Config(format!(
+                "skip mounting hole ({x}, {y}): no mounting hole within \
+                 {SKIP_MATCH_TOLERANCE_MM} mm (`ict-jig-gen holes` lists them)"
+            )));
+        }
+        self.mounting
+            .retain(|h| !points.iter().any(|&p| near(h, p)));
+        Ok(())
     }
 
     /// Attach component centroids (overrides any earlier set).

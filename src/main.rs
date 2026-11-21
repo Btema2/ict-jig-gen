@@ -8,7 +8,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 use ict_jig_gen::app::{self, GenerateRequest};
-use ict_jig_gen::config::{Alignment, ConfigFile, ElementSpec, ImageSize, ProbeSpec, Typ};
+use ict_jig_gen::config::{Alignment, ConfigFile, ElementSpec, ImageSize, PadRef, ProbeSpec, Typ};
 
 /// Generate a pogo-pin test cassette (STL) and pin map (JSON) from an EasyEDA Gerber package.
 #[derive(Debug, Parser)]
@@ -123,9 +123,14 @@ struct GenerateArgs {
     /// Needs at least 2 mounting holes.
     #[arg(long)]
     compact: bool,
-    /// Build the default cassette even if the config file sets compact = true.
+    /// Build the default cassette even if the config file sets compact = true (a margin under
+    /// 7 mm from that file then also needs --margin).
     #[arg(long, conflicts_with = "compact")]
     no_compact: bool,
+    /// Give the mounting hole at X,Y (board mm, as `holes` lists it) no alignment post or
+    /// --compact pillar, e.g. a hole filled by a connector's locating peg. Repeatable.
+    #[arg(long = "skip-mounting-hole", value_name = "X,Y", value_parser = parse_xy)]
+    skip_mounting_holes: Vec<[f64; 2]>,
 
     /// Take the pixel size from an existing board image (PNG/JPEG).
     #[arg(long, value_name = "FILE")]
@@ -141,6 +146,13 @@ fn parse_element(s: &str) -> Result<ElementSpec, String> {
 
 fn parse_rail(s: &str) -> Result<ElementSpec, String> {
     ElementSpec::parse_pair(s, Typ::Linia)
+}
+
+fn parse_xy(s: &str) -> Result<[f64; 2], String> {
+    match s.parse::<PadRef>()? {
+        PadRef::Xy(xy) => Ok(xy),
+        PadRef::Name(_) => Err(format!("{s:?}: expected X,Y in board mm")),
+    }
 }
 
 impl GenerateArgs {
@@ -175,6 +187,7 @@ impl GenerateArgs {
             auto_elements: self.no_auto_elements.then_some(false),
             probe: self.probes.clone(),
             element: self.elements.iter().chain(&self.rails).cloned().collect(),
+            skip_mounting_holes: self.skip_mounting_holes.clone(),
         }
     }
 }

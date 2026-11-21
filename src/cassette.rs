@@ -43,7 +43,7 @@
 //! on the cassette, probes touch its underside pads).
 
 use crate::board::Board;
-use crate::config::{Alignment, Mechanical};
+use crate::config::{Alignment, MIN_MARGIN, Mechanical};
 use crate::error::{Error, Result};
 use crate::geom::Point;
 use crate::mesh::{Mesh, P2, Region, circle, rect};
@@ -72,6 +72,9 @@ const LIP_FEATURE_GAP: f64 = 0.4;
 pub const SHOULDER_LEDGE: f64 = 1.0;
 /// Fewest mounting holes `compact` can stand the plates on.
 pub const MIN_COMPACT_PILLARS: usize = 2;
+/// Thinnest pin of a split compact pillar: it stands free, about 6 mm tall, and locates the
+/// top plate, so it must survive printing and handling.
+pub const MIN_PIN_DIAMETER: f64 = 1.2;
 
 /// File name of the combined cassette (default mode).
 pub const STL_NAME: &str = "cassette.stl";
@@ -274,7 +277,8 @@ impl Solids {
     }
 }
 
-/// A `compact` cassette compared with the default one the same settings would give.
+/// A `compact` cassette compared with the one the same settings give without `compact` (with
+/// the default 8 mm margin if the requested one is below the default cassette's 7 mm minimum).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Savings {
     /// Footprint of the default cassette along X, mm.
@@ -307,7 +311,11 @@ pub fn build(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
     if mech.compact {
         let default = Mechanical {
             compact: false,
-            margin: Mechanical::default().margin,
+            margin: if mech.margin >= MIN_MARGIN {
+                mech.margin
+            } else {
+                Mechanical::default().margin
+            },
             ..mech.clone()
         };
         cassette.savings = build_one(board, probes, &default).ok().map(|d| Savings {
@@ -400,8 +408,8 @@ fn build_one(board: &Board, probes: &[Probe], mech: &Mechanical) -> Result<Casse
     };
     check_clearances(&layout, probes, mech)?;
     stack_up_warning(mech, &mut warnings);
-    if mech.split {
-        one_line_warning(&layout.stepped_pillars, &mut warnings);
+    if mech.split && mech.compact {
+        tipping_warning(&layout, &mut warnings);
     }
 
     let solids = assemble(&layout, mech)?;
@@ -476,39 +484,54 @@ fn compact_margin(
     widened
 }
 
-/// A split compact top plate rests on the shoulders only. If they all stand in (nearly) one
-/// line, nothing props it up on either side of that line.
-fn one_line_warning(pillars: &[SteppedPillar], warnings: &mut Vec<String>) {
-    let mut far: Option<(f64, Point, Point)> = None;
-    for (i, a) in pillars.iter().enumerate() {
-        for b in pillars.iter().skip(i + 1) {
-            let d = a.center.distance(b.center);
-            if far.is_none_or(|(best, _, _)| d > best) {
-                far = Some((d, a.center, b.center));
-            }
-        }
-    }
-    let Some((length, a, b)) = far.filter(|f| f.0 > 0.0) else {
-        return;
+/// A split compact top plate rests loose on the shoulders. If the pillars do not surround the
+/// middle of the plate, pressing the board down tips it about the edge of their support area.
+fn tipping_warning(l: &Layout, warnings: &mut Vec<String>) {
+    let centers: Vec<Point> = l.stepped_pillars.iter().map(|s| s.center).collect();
+    let hull = convex_hull(centers);
+    let middle = Point::new(l.width / 2.0, l.depth / 2.0);
+    let side = |a: Point, b: Point, p: Point| {
+        ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)) / a.distance(b)
     };
-    let off_line =
-        |p: Point| ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)).abs() / length;
-    let spread = pillars
-        .iter()
-        .map(|s| off_line(s.center))
-        .fold(0.0, f64::max);
-    let width = pillars
-        .iter()
-        .map(|s| s.shoulder_diameter)
-        .fold(0.0, f64::max);
-    if spread < width {
+    let surrounded = hull.len() >= 3
+        && (0..hull.len()).all(|i| side(hull[i], hull[(i + 1) % hull.len()], middle) > 1e-6);
+    if !surrounded {
+        let in_line = if hull.len() < 3 {
+            " (they stand in one line)"
+        } else {
+            ""
+        };
         warnings.push(format!(
-            "--compact --split: the {} pillars stand in one line, so the loose top plate rests on \
-             that line only and can tip under an off-centre press; press the board down close to \
-             the posts",
-            pillars.len()
+            "--compact --split: the {} pillars do not surround the middle of the top plate{in_line}, \
+             so the loose plate can tip when the board is pressed down; press close to the posts",
+            l.stepped_pillars.len()
         ));
     }
+}
+
+/// Counter-clockwise convex hull (monotone chain); collinear points are dropped, so points in
+/// one line give two.
+fn convex_hull(mut points: Vec<Point>) -> Vec<Point> {
+    points.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    points.dedup_by(|a, b| a.distance(*b) < 1e-9);
+    if points.len() < 3 {
+        return points;
+    }
+    let turn = |o: Point, a: Point, b: Point| (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    let chain = |pts: &mut dyn Iterator<Item = Point>| {
+        let mut out: Vec<Point> = Vec::new();
+        for p in pts {
+            while out.len() >= 2 && turn(out[out.len() - 2], out[out.len() - 1], p) <= 0.0 {
+                out.pop();
+            }
+            out.push(p);
+        }
+        out.pop(); // the end point starts the other chain
+        out
+    };
+    let mut hull = chain(&mut points.iter().copied());
+    hull.extend(chain(&mut points.iter().rev().copied()));
+    hull
 }
 
 /// The margin to build with. In split mode with a registration lip, the M3 screw head on each
@@ -620,9 +643,10 @@ fn plan_alignment(
         if eligible.len() < MIN_COMPACT_PILLARS {
             return Err(Error::Geometry(format!(
                 "--compact stands the plates on pillars at the board's mounting holes and needs at \
-                 least {MIN_COMPACT_PILLARS} non-plated holes >= {MIN_POST_HOLE_DIAMETER} mm, but \
-                 the board has {}; drop --compact to build the default cassette, which locates the \
-                 board with a registration lip instead",
+                 least {MIN_COMPACT_PILLARS} mounting holes >= {MIN_POST_HOLE_DIAMETER} mm (as \
+                 `ict-jig-gen holes` lists them, minus any --skip-mounting-hole), but has {}; drop \
+                 --compact and use --alignment auto or lip to build the default cassette with a \
+                 registration lip instead",
                 eligible.len()
             )));
         }
@@ -764,11 +788,28 @@ fn check_clearances(layout: &Layout, probes: &[Probe], mech: &Mechanical) -> Res
     Ok(())
 }
 
-/// `compact`: no two shoulders may merge, and no pogo bore may cut into a shoulder (the barrel
-/// runs past it in the cavity). The bore keeps `--min-wall` from the shoulder.
+/// `compact`: split pins must be printable, no two shoulders may merge, and no pogo bore may cut
+/// into a shoulder (the barrel runs past it in the cavity). The bore keeps `--min-wall` from the
+/// shoulder.
 fn check_stepped_pillars(layout: &Layout, probes: &[Probe], mech: &Mechanical) -> Result<()> {
     // mounting holes are named in board coordinates, as `ict-jig-gen holes` lists them
     let board_xy = |p: Point| (p.x - layout.offset.x, p.y - layout.offset.y);
+    // one-piece, the pin is only the short post above a fused plate, as in the default cassette
+    if mech.split
+        && let Some(s) = layout
+            .stepped_pillars
+            .iter()
+            .find(|s| s.pin_diameter < MIN_PIN_DIAMETER - 1e-9)
+    {
+        let (x, y) = board_xy(s.center);
+        return Err(Error::Geometry(format!(
+            "--compact --split: the {:.2} mm mounting hole at ({x:.2}, {y:.2}) mm leaves a {:.2} mm \
+             pin (hole - --clearance), thinner than the {MIN_PIN_DIAMETER} mm a free-standing pin \
+             needs; reduce --clearance, or leave the hole out with --skip-mounting-hole {x:.2},{y:.2}",
+            s.pin_diameter + mech.clearance,
+            s.pin_diameter
+        )));
+    }
     for (i, a) in layout.stepped_pillars.iter().enumerate() {
         for b in layout.stepped_pillars.iter().skip(i + 1) {
             let need = f64::midpoint(a.shoulder_diameter, b.shoulder_diameter) + mech.min_wall;

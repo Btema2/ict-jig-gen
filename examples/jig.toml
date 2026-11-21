@@ -5,10 +5,13 @@ pogo = "P75-LM2"          # or "P100-E2"; a custom name needs barrel_diameter + 
 clearance = 0.15          # extra hole diameter for FDM tolerance (mm)
 plate_thickness = 3.0     # each guide plate (mm)
 standoff_height = 8.0     # gap between the plates (mm)
-margin = 8.0              # plate overhang around the board outline (mm)
+# margin = 8.0            # plate overhang around the board outline (mm); unset = 8, or 0 with
+                          # compact. Setting it here also applies to compact, so leave it commented.
 alignment = "auto"        # auto | posts | lip | both | none
 split = false             # true: cassette_bottom.stl + cassette_top.stl, print flat, join with 4x M3 screws
 compact = false           # true: footprint = board outline, pillars on the mounting holes (>= 2); with split: no screws
+# skip_mounting_holes = [[105.0, 85.0]]  # board X,Y (mm) of mounting holes that get no post/pillar,
+                                         # e.g. ones filled by a connector's locating pegs
 image_size = "512x512"    # pixel size of zdjecie_plytki.png (or: image = "zdjecie_plytki.png")
 
 # Explicit pin assignment. When any [[probe]] is present, automatic selection is off, so this

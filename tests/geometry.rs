@@ -1016,26 +1016,178 @@ fn compact_is_watertight_and_split_is_flat_for_a_sweep_of_board_sizes() {
 }
 
 #[test]
-fn compact_split_on_pillars_in_one_line_warns_that_the_top_can_tip() {
-    let pth = [(20.0, 22.0), (24.0, 22.0)];
-    let in_a_row = [(5.0, 10.0), (20.0, 10.5), (35.0, 10.0)];
-    let tip = |out: &ict_jig_gen::app::Outputs| {
-        out.cassette
+fn compact_split_warns_when_the_pillars_do_not_surround_the_middle_of_the_plate() {
+    let tip = |bbox, pth: &[(f64, f64)], npth: &[(f64, f64)], split: bool| {
+        let config = ConfigFile {
+            split: Some(split),
+            ..compact_config()
+        };
+        let (res, _d) = generate_package(bbox, pth, npth, config);
+        let out = res.unwrap();
+        let w = out
+            .cassette
             .warnings
             .iter()
-            .any(|w| w.contains("stand in one line"))
+            .find(|w| w.contains("can tip"))
+            .cloned();
+        w.map(|w| w.contains("one line"))
     };
-    let split = ConfigFile {
-        split: Some(true),
+    let small = (0.0, 0.0, 40.0, 30.0); // middle (20, 15)
+    let pth = [(20.0, 22.0), (24.0, 22.0)];
+    // two holes, or three exactly in a row: the plate rests on a line
+    assert_eq!(
+        tip(small, &pth, &[(5.0, 5.0), (35.0, 25.0)], true),
+        Some(true)
+    );
+    let row = [(5.0, 10.0), (20.0, 10.0), (35.0, 10.0)];
+    assert_eq!(tip(small, &pth, &row, true), Some(true));
+    // a thin triangle that misses the middle tips just the same
+    let thin = [(5.0, 10.0), (20.0, 10.5), (35.0, 10.0)];
+    assert_eq!(tip(small, &pth, &thin, true), Some(false));
+    let long = [(5.0, 10.0), (95.0, 10.0), (50.0, 15.0)];
+    assert_eq!(
+        tip(
+            (0.0, 0.0, 100.0, 60.0),
+            &[(50.0, 40.0), (54.0, 40.0)],
+            &long,
+            true
+        ),
+        Some(false)
+    );
+    // pillars around the middle carry it; one-piece, the plate is fused to them anyway
+    let around = [(5.0, 10.0), (35.0, 10.0), (20.0, 27.0)];
+    assert_eq!(tip(small, &pth, &around, true), None);
+    assert_eq!(tip(small, &pth, &row, false), None);
+}
+
+#[test]
+fn skipped_mounting_holes_get_no_post_or_pillar() {
+    // two real mounting holes plus a connector peg hole that must stay free
+    let npth = [(5.0, 5.0), (35.0, 25.0), (30.0, 8.0)];
+    let pth = [(20.0, 15.0), (24.0, 15.0)];
+    let skip = |config: ConfigFile| ConfigFile {
+        skip_mounting_holes: vec![[30.2, 7.9]], // matched to within 0.5 mm
+        ..config
+    };
+    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, compact_config());
+    assert_eq!(res.unwrap().cassette.layout.stepped_pillars.len(), 3);
+    for split in [false, true] {
+        let config = skip(ConfigFile {
+            split: Some(split),
+            ..compact_config()
+        });
+        let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, config);
+        let out = res.unwrap();
+        let l = &out.cassette.layout;
+        assert_eq!(l.stepped_pillars.len(), 2);
+        assert!(
+            l.posts
+                .iter()
+                .all(|p| p.center.distance(ict_jig_gen::geom::Point::new(30.0, 8.0)) > 1.0)
+        );
+        for path in &out.stl_paths {
+            let mesh = read_stl(path);
+            assert!(mesh.topology().is_watertight(), "{path:?}");
+            // nothing stands on the skipped hole: plain plate faces only
+            assert!(
+                vertices_near(&mesh, 30.0, 8.0, 14.0, 2.0).is_empty(),
+                "{path:?}"
+            );
+        }
+    }
+    // the default cassette honours it too
+    let (res, _d) = generate_package(
+        (0.0, 0.0, 40.0, 30.0),
+        &pth,
+        &npth,
+        skip(ConfigFile::default()),
+    );
+    assert_eq!(res.unwrap().cassette.layout.posts.len(), 2);
+    // skipping below two holes leaves compact without footing, and the message says why
+    let config = ConfigFile {
+        skip_mounting_holes: vec![[30.0, 8.0], [5.0, 5.0]],
         ..compact_config()
     };
-    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &in_a_row, split.clone());
-    assert!(tip(&res.unwrap()));
-    // one-piece, the top plate is fused to the pillars
-    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &in_a_row, compact_config());
-    assert!(!tip(&res.unwrap()));
-    // a third hole off the line props the plate
-    let triangle = [(5.0, 10.0), (35.0, 10.0), (20.0, 27.0)];
-    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &triangle, split);
-    assert!(!tip(&res.unwrap()));
+    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, config);
+    let msg = res.unwrap_err().to_string();
+    assert!(
+        msg.contains("--skip-mounting-hole") && msg.contains("has 1"),
+        "{msg}"
+    );
+    // a position that names no mounting hole is a typo, not a silent no-op
+    let config = ConfigFile {
+        skip_mounting_holes: vec![[30.0, 9.0]],
+        ..compact_config()
+    };
+    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, config);
+    let msg = res.unwrap_err().to_string();
+    assert!(msg.contains("no mounting hole within 0.5 mm"), "{msg}");
+}
+
+#[test]
+fn compact_split_refuses_pins_too_thin_to_print() {
+    let dir = tempfile::tempdir().unwrap();
+    let pkg = dir.path().join("pkg");
+    std::fs::create_dir(&pkg).unwrap();
+    common::write_package(
+        &pkg,
+        (0.0, 0.0, 40.0, 30.0),
+        &[(20.0, 15.0), (24.0, 15.0)],
+        &[],
+    );
+    // 1.5 mm mounting holes: the smallest that get a post at all
+    std::fs::write(
+        pkg.join("Drill_NPTH_Through.DRL"),
+        "M48\nMETRIC,TZ\nT1C1.5\n%\nT1\nX5.000Y5.000\nX35.000Y25.000\nM30\n",
+    )
+    .unwrap();
+    let run = |clearance: f64, split: bool| {
+        ict_jig_gen::app::generate(&ict_jig_gen::app::GenerateRequest {
+            input: pkg.clone(),
+            out_dir: dir.path().join("out"),
+            pnp: None,
+            config: ConfigFile {
+                clearance: Some(clearance),
+                split: Some(split),
+                ..compact_config()
+            },
+        })
+    };
+    // 1.5 - 0.15 = 1.35 mm pins are fine; 1.5 - 0.35 = 1.15 mm stand free too thin
+    run(0.15, true).unwrap();
+    let msg = run(0.35, true).unwrap_err().to_string();
+    assert!(
+        msg.contains("1.15 mm pin")
+            && msg.contains("--skip-mounting-hole 35.00,25.00")
+            && !msg.contains("internal error"),
+        "{msg}"
+    );
+    // one-piece, the pin is just a short post on a fused plate, as in the default cassette
+    run(0.35, false).unwrap();
+}
+
+#[test]
+fn compact_savings_compare_with_the_same_margin_when_it_is_valid() {
+    let savings = |margin: Option<f64>| {
+        let (out, _d) = generate_demo(ConfigFile {
+            margin,
+            ..compact_config()
+        });
+        out.cassette.savings.unwrap()
+    };
+    // compact default (0 mm) and a margin the default cassette refuses: compared with 8 mm
+    for margin in [None, Some(3.0)] {
+        let s = savings(margin);
+        assert!(
+            close(s.default_width, 76.0) && close(s.default_depth, 56.0),
+            "{s:?}"
+        );
+    }
+    // a valid margin is kept, so only the pillars differ
+    let s = savings(Some(10.0));
+    assert!(
+        close(s.default_width, 80.0) && close(s.default_depth, 60.0),
+        "{s:?}"
+    );
+    assert!(s.volume < s.default_volume);
 }

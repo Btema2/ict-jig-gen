@@ -782,3 +782,54 @@ fn cli_compact_flag_and_config_key_shrink_the_cassette() {
         "{err}"
     );
 }
+
+#[test]
+fn cli_skip_mounting_hole_flag_leaves_a_hole_free() {
+    let dir = tempfile::tempdir().unwrap();
+    let run = |extra: &[&str], out: &std::path::Path| {
+        cli()
+            .arg("generate")
+            .arg(demo_zip())
+            .arg("--pnp")
+            .arg(demo_pnp())
+            .args(extra)
+            .arg("-o")
+            .arg(out)
+            .output()
+            .unwrap()
+    };
+    // the demo board's mounting holes are its four corners, 5 mm in (board mm 105/155, 55/85)
+    let out = dir.path().join("skip");
+    let o = run(
+        &[
+            "--compact",
+            "--split",
+            "--skip-mounting-hole",
+            "155,85",
+            "--skip-mounting-hole",
+            "105.1,55",
+        ],
+        &out,
+    );
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let stdout = String::from_utf8(o.stdout).unwrap();
+    assert!(stdout.contains("2 stepped pillars"), "{stdout}");
+    // the two left are diagonal: the loose top plate can tip, and the guide says so
+    assert!(stdout.contains("can tip"), "{stdout}");
+    let bottom = common::read_stl(&out.join("cassette_bottom.stl"));
+    assert!(bottom.topology().is_watertight());
+    // no pillar rises at the skipped corners (cassette = board - (100, 50))
+    for (x, y) in [(55.0, 35.0), (5.0, 5.0)] {
+        assert!(common::vertices_near(&bottom, x, y, 11.0, 2.5).is_empty());
+    }
+    // not a position, or no hole there: clean errors
+    let o = run(&["--skip-mounting-hole", "H3"], &dir.path().join("bad"));
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("expected X,Y"));
+    let o = run(
+        &["--skip-mounting-hole", "130,70"],
+        &dir.path().join("none"),
+    );
+    assert!(!o.status.success());
+    assert!(String::from_utf8_lossy(&o.stderr).contains("no mounting hole within"));
+}

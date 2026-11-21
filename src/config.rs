@@ -13,7 +13,7 @@ use crate::error::{Error, Result};
 pub const MAX_PIN: u8 = 15;
 
 /// Smallest margin of the default cassette: its perimeter pillars stand in the margin.
-const MIN_MARGIN: f64 = 7.0;
+pub const MIN_MARGIN: f64 = 7.0;
 /// Margin used by `compact` unless one is given: the footprint is the board outline.
 pub const COMPACT_MARGIN: f64 = 0.0;
 
@@ -191,7 +191,18 @@ impl Mechanical {
         check("standoff height", self.standoff_height, 1.0, 100.0)?;
         // the perimeter pillars live in the margin; compact mode has none
         let min_margin = if self.compact { 0.0 } else { MIN_MARGIN };
-        check("margin", self.margin, min_margin, 50.0)?;
+        if !(self.margin.is_finite() && (min_margin..=50.0).contains(&self.margin)) {
+            let hint = if self.compact {
+                ""
+            } else {
+                "; only --compact allows less (with --no-compact, override a small margin from \
+                 the config file with --margin)"
+            };
+            return Err(Error::Config(format!(
+                "margin = {} is outside the supported range {min_margin}..=50 mm{hint}",
+                self.margin
+            )));
+        }
         check("min wall", self.min_wall, 0.2, 5.0)?;
         check("pcb thickness", self.pcb_thickness, 0.2, 6.0)?;
         check("lip height", self.lip_height, 0.2, 10.0)?;
@@ -419,6 +430,10 @@ pub struct ConfigFile {
     pub split: Option<bool>,
     /// Footprint = board outline, pillars on the mounting holes (needs >= 2 of them).
     pub compact: Option<bool>,
+    /// Mounting holes (board `[x, y]` mm, matched to within 0.5 mm) that get no alignment post
+    /// or compact pillar, e.g. holes filled by a connector's locating pegs.
+    #[serde(default)]
+    pub skip_mounting_holes: Vec<[f64; 2]>,
     /// Existing board image to take pixel dimensions from.
     pub image: Option<PathBuf>,
     /// Explicit `WxH` (wins over `image`).
@@ -473,6 +488,7 @@ impl ConfigFile {
             include_vias,
             auto_elements
         );
+        self.skip_mounting_holes.extend(over.skip_mounting_holes);
         if over.image.is_some() || over.image_size.is_some() {
             self.image = over.image;
             self.image_size = over.image_size;
@@ -503,6 +519,8 @@ pub struct Settings {
     pub probes: Vec<ProbeSpec>,
     /// Explicit elements.
     pub elements: Vec<ElementSpec>,
+    /// Mounting holes to leave without a post / pillar (board mm).
+    pub skip_mounting_holes: Vec<[f64; 2]>,
 }
 
 impl Settings {
@@ -581,6 +599,15 @@ impl Settings {
                 )));
             }
         }
+        if let Some([x, y]) = cfg
+            .skip_mounting_holes
+            .iter()
+            .find(|p| !p.iter().all(|v| v.is_finite()))
+        {
+            return Err(Error::Config(format!(
+                "skip_mounting_holes: ({x}, {y}) is not a position in mm"
+            )));
+        }
         Ok(Self {
             mech,
             image,
@@ -588,6 +615,7 @@ impl Settings {
             auto_elements: cfg.auto_elements.unwrap_or(true),
             probes: cfg.probe,
             elements: cfg.element,
+            skip_mounting_holes: cfg.skip_mounting_holes,
         })
     }
 }
@@ -773,6 +801,29 @@ mod tests {
         });
         let e = Settings::resolve(cfg).unwrap_err().to_string();
         assert!(e.contains("margin = 2.5") && e.contains("7..=50"), "{e}");
+        // the error says how to get out of it with --no-compact
+        assert!(
+            e.contains("only --compact") && e.contains("--margin"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn skipped_mounting_holes_add_up_and_must_be_positions() {
+        let mut cfg: ConfigFile = toml::from_str("skip_mounting_holes = [[105.0, 85.0]]").unwrap();
+        cfg.overlay(ConfigFile {
+            skip_mounting_holes: vec![[155.0, 55.0]],
+            ..ConfigFile::default()
+        });
+        let s = Settings::resolve(cfg).unwrap();
+        assert_eq!(s.skip_mounting_holes, vec![[105.0, 85.0], [155.0, 55.0]]);
+        let bad: ConfigFile = toml::from_str("skip_mounting_holes = [[nan, 1.0]]").unwrap();
+        assert!(
+            Settings::resolve(bad)
+                .unwrap_err()
+                .to_string()
+                .contains("skip_mounting_holes")
+        );
     }
 
     #[test]
