@@ -33,6 +33,11 @@ just preview-top out/cassette.stl out/top.png   # looking down -Z: X axis up, Y 
 With `--split`, render both halves (`out/cassette_bottom.stl`, `out/cassette_top.stl`) and
 check each is on Z = 0 and has no downward-facing triangle above the bed.
 
+With `--compact` (one piece or `--split`), also check that the footprint is the board outline,
+that there are no perimeter pillars or M3 bosses, and that a stepped pillar (shoulder, pin,
+tapered tip) stands on every mounting hole not passed to `--skip-mounting-hole`. In split mode
+the top half is a flat plate whose sockets sit exactly over the bottom half's pins.
+
 If `just preview` fails, read the error. Do not add `--rendering-backend` (egl/osmesa/glx
 are unavailable here; the default backend works headless).
 

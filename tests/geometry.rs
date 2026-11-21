@@ -661,3 +661,533 @@ fn split_is_watertight_and_flat_for_a_sweep_of_board_sizes() {
         }
     }
 }
+
+// ------------------------------------------------------------------ --compact
+
+fn compact_config() -> ConfigFile {
+    ConfigFile {
+        compact: Some(true),
+        ..ConfigFile::default()
+    }
+}
+
+/// Run the pipeline on a synthetic package (outline box, PTH, 2.2 mm NPTH).
+fn generate_package(
+    bbox: (f64, f64, f64, f64),
+    pth: &[(f64, f64)],
+    npth: &[(f64, f64)],
+    config: ConfigFile,
+) -> (
+    ict_jig_gen::Result<ict_jig_gen::app::Outputs>,
+    tempfile::TempDir,
+) {
+    let dir = tempfile::tempdir().unwrap();
+    let pkg = dir.path().join("pkg");
+    std::fs::create_dir(&pkg).unwrap();
+    common::write_package(&pkg, bbox, pth, npth);
+    let out = ict_jig_gen::app::generate(&ict_jig_gen::app::GenerateRequest {
+        input: pkg,
+        out_dir: dir.path().join("out"),
+        pnp: None,
+        config,
+    });
+    (out, dir)
+}
+
+/// Finite coordinates and no zero-area slivers (the watertight check only sees indices).
+fn assert_no_degenerate_triangles(mesh: &Mesh, name: &str) {
+    assert!(mesh.triangle_count() > 0, "{name}: empty");
+    for t in mesh.triangles() {
+        assert!(t.iter().flatten().all(|c| c.is_finite()), "{name}: {t:?}");
+        let (u, v) = (
+            [t[1][0] - t[0][0], t[1][1] - t[0][1], t[1][2] - t[0][2]],
+            [t[2][0] - t[0][0], t[2][1] - t[0][1], t[2][2] - t[0][2]],
+        );
+        let area2 = ((u[1] * v[2] - u[2] * v[1]).powi(2)
+            + (u[2] * v[0] - u[0] * v[2]).powi(2)
+            + (u[0] * v[1] - u[1] * v[0]).powi(2))
+        .sqrt();
+        assert!(area2 > 1e-9, "{name}: zero-area triangle {t:?}");
+    }
+}
+
+/// Distance of every vertex in `ring` from `(x, y)`: (min, max).
+fn radii(ring: &[[f64; 3]], x: f64, y: f64) -> (f64, f64) {
+    ring.iter()
+        .map(|v| (v[0] - x).hypot(v[1] - y))
+        .fold((f64::MAX, 0.0), |(lo, hi), r| (lo.min(r), hi.max(r)))
+}
+
+#[test]
+fn compact_footprint_is_the_board_outline_with_pillars_on_the_mounting_holes() {
+    let (out, dir) = generate_demo(compact_config());
+    assert_eq!(out.stl_paths, vec![dir.path().join("cassette.stl")]);
+    let mesh = read_stl(&out.stl_paths[0]);
+    let topo = mesh.topology();
+    assert!(topo.is_watertight(), "{topo:?}");
+    assert_no_degenerate_triangles(&mesh, "compact");
+    assert!(mesh.signed_volume() > 1000.0);
+    // exactly the 60 x 40 mm board outline; Z as in the default cassette
+    let (lo, hi) = mesh.bounds().unwrap();
+    assert!(
+        close(lo[0], 0.0) && close(lo[1], 0.0) && close(lo[2], 0.0),
+        "{lo:?}"
+    );
+    assert!(
+        close(hi[0], 60.0) && close(hi[1], 40.0) && close(hi[2], 16.6),
+        "{hi:?}"
+    );
+    let l = &out.cassette.layout;
+    assert_eq!(l.margin, 0.0);
+    assert!(l.pillars.is_empty(), "no perimeter pillars");
+    assert!(l.joint.is_none(), "no screws");
+    assert_eq!(l.stepped_pillars.len(), 4);
+    for (x, y) in [(5.0, 5.0), (55.0, 5.0), (5.0, 35.0), (55.0, 35.0)] {
+        let s = l
+            .stepped_pillars
+            .iter()
+            .find(|s| close(s.center.x, x) && close(s.center.y, y))
+            .unwrap();
+        assert!(close(s.pin_diameter, 2.05) && close(s.socket_diameter, 2.2));
+        assert!(close(s.shoulder_diameter, 4.2));
+        // the post above the top plate is the pillar's pin
+        assert!(
+            l.posts
+                .iter()
+                .any(|p| p.center == s.center && p.diameter == s.pin_diameter)
+        );
+        // shoulder: a 4.2 mm ring at the cavity floor (z = 3) and ceiling (z = 11)
+        for z in [3.0, 11.0] {
+            let ring = vertices_near(&mesh, x, y, z, 2.5);
+            assert_eq!(ring.len(), 32, "shoulder at ({x}, {y}) z = {z}");
+            let (rmin, rmax) = radii(&ring, x, y);
+            assert!(rmax <= 2.1 + EPS && rmin >= 2.08, "{rmin} {rmax}");
+        }
+        // fused: inside the shoulder only the base and the top deck are horizontal faces
+        assert_eq!(flat_triangles_covering(&mesh, x + 1.1, y + 1.03), 2);
+        assert!(
+            vertices_near(&mesh, x, y, 16.6, 2.0).len() >= 16,
+            "post tip"
+        );
+    }
+    // a solid point away from everything: base, cavity floor, cavity ceiling, deck
+    assert_eq!(flat_triangles_covering(&mesh, 25.3, 24.7), 4);
+    for (probe, hole) in out.pin_map.probes.iter().zip(&l.holes) {
+        assert!(close(hole.x, probe.hole.pos.x - 100.0) && close(hole.y, probe.hole.pos.y - 50.0));
+        assert_eq!(flat_triangles_covering(&mesh, hole.x, hole.y), 0);
+        for z in [0.0, 3.0, 11.0, 14.0] {
+            let ring = vertices_near(&mesh, hole.x, hole.y, z, 1.0);
+            assert_eq!(ring.len(), 32, "pin {} z={z}", probe.pin);
+            assert!(radii(&ring, hole.x, hole.y).0 >= 1.17 / 2.0 - EPS);
+        }
+    }
+    let savings = out.cassette.savings.unwrap();
+    assert!(close(savings.default_width, 76.0) && close(savings.default_depth, 56.0));
+    assert!(close(savings.volume, mesh.signed_volume()));
+    assert!(savings.volume < 0.7 * savings.default_volume, "{savings:?}");
+    assert!(
+        out.cassette.warnings.is_empty(),
+        "{:?}",
+        out.cassette.warnings
+    );
+    assert!(
+        out.guide
+            .contains("Compact   : footprint = board outline + 0.00 mm margin")
+    );
+    assert!(out.guide.contains("(-44 %)") && !out.guide.contains("no screws"));
+}
+
+#[test]
+fn compact_split_halves_slide_together_without_screws() {
+    let (out, bottom, top, dir) = split_demo(ConfigFile {
+        split: Some(true),
+        ..compact_config()
+    });
+    assert!(!dir.path().join("cassette.stl").exists());
+    let l = &out.cassette.layout;
+    assert!(l.joint.is_none() && l.pillars.is_empty());
+    for (name, mesh) in [("bottom", &bottom), ("top", &top)] {
+        let topo = mesh.topology();
+        assert!(topo.is_watertight(), "{name}: {topo:?}");
+        assert!(mesh.signed_volume() > 500.0, "{name}: inside out?");
+        assert_no_degenerate_triangles(mesh, name);
+        let (lo, hi) = mesh.bounds().unwrap();
+        assert!(
+            close(lo[0], 0.0) && close(lo[1], 0.0) && close(lo[2], 0.0),
+            "{name}: {lo:?}"
+        );
+        assert!(close(hi[0], 60.0) && close(hi[1], 40.0), "{name}: {hi:?}");
+        assert_eq!(overhang_triangles(mesh), 0, "{name} needs supports");
+    }
+    // bottom: up to the post tips; top: a flat 3 mm plate, assembled at z = 11..14
+    assert!(close(bottom.bounds().unwrap().1[2], l.height));
+    assert!(close(l.height, 14.0 + 2.6));
+    assert!(close(top.bounds().unwrap().1[2], 3.0));
+    assert!(close(l.z_top_plate_bottom + 3.0, l.z_top_plate_top));
+    // nothing but the pins rises above the shoulders: no bosses, no perimeter pillars
+    for v in bottom.triangles().flatten() {
+        if v[2] > 11.0 + EPS {
+            assert!(
+                l.stepped_pillars
+                    .iter()
+                    .any(|s| (v[0] - s.center.x).hypot(v[1] - s.center.y)
+                        <= s.pin_diameter / 2.0 + EPS),
+                "{v:?} sticks up outside a pin"
+            );
+        }
+    }
+    for s in &l.stepped_pillars {
+        let (x, y) = (s.center.x, s.center.y);
+        // the ledge at z = 11: the shoulder ring outside, the pin ring inside
+        let ledge = vertices_near(&bottom, x, y, 11.0, 2.5);
+        assert_eq!(ledge.len(), 64);
+        let (pin, shoulder): (Vec<_>, Vec<_>) =
+            ledge.iter().partition(|v| (v[0] - x).hypot(v[1] - y) < 1.5);
+        let (pin_min, pin_max) = radii(&pin, x, y);
+        let (shoulder_min, _) = radii(&shoulder, x, y);
+        assert!(pin_max <= s.pin_diameter / 2.0 + EPS && pin_min > 0.9);
+        // the socket goes right through the top plate and is never smaller than pin + clearance
+        let mut socket_max: f64 = 0.0;
+        for z in [0.0, 3.0] {
+            let ring = vertices_near(&top, x, y, z, 1.5);
+            assert_eq!(ring.len(), 32, "socket at ({x}, {y}) z = {z}");
+            let (rmin, rmax) = radii(&ring, x, y);
+            assert!(rmin >= s.socket_diameter / 2.0 - EPS, "{rmin}");
+            assert!(rmin < pin_max + 0.3, "slip fit, not slop: {rmin}");
+            socket_max = socket_max.max(rmax);
+        }
+        assert_eq!(flat_triangles_covering(&top, x, y), 0, "socket is open");
+        // the pin passes the socket, and the plate cannot slip past the shoulder
+        assert!(pin_max < s.socket_diameter / 2.0);
+        assert!(
+            socket_max + 0.9 < shoulder_min,
+            "{socket_max} vs {shoulder_min}"
+        );
+    }
+    // the pogo bores of both halves line up
+    for hole in &l.holes {
+        for (mesh, z) in [(&bottom, 0.0), (&bottom, 3.0), (&top, 0.0), (&top, 3.0)] {
+            let ring = vertices_near(mesh, hole.x, hole.y, z, 1.0);
+            assert_eq!(ring.len(), 32);
+            assert!(radii(&ring, hole.x, hole.y).0 >= 1.17 / 2.0 - EPS);
+        }
+    }
+    assert!(
+        out.cassette.warnings.is_empty(),
+        "{:?}",
+        out.cassette.warnings
+    );
+    assert!(out.guide.contains("no screws") && out.guide.contains("2.20 mm socket per pin"));
+    assert!(!out.guide.contains("M3"), "{}", out.guide);
+}
+
+#[test]
+fn compact_needs_two_mounting_holes() {
+    let pth = [(10.0, 10.0), (14.0, 12.0)];
+    for npth in [&[][..], &[(30.0, 20.0)][..]] {
+        let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, npth, compact_config());
+        let msg = res.unwrap_err().to_string();
+        assert!(
+            msg.contains("--compact")
+                && msg.contains("at least 2")
+                && msg.contains("registration lip"),
+            "{msg}"
+        );
+        // the default cassette copes
+        let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, npth, ConfigFile::default());
+        res.unwrap();
+    }
+}
+
+#[test]
+fn compact_refuses_a_probe_that_hits_a_pillar_shoulder() {
+    let npth = [(5.0, 5.0), (35.0, 25.0)];
+    // 2.8 mm from a mounting hole: clear of a 2.05 mm post, but inside the 4.2 mm shoulder
+    let pth = [(7.8, 5.0), (20.0, 15.0)];
+    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, compact_config());
+    let msg = res.unwrap_err().to_string();
+    assert!(
+        msg.contains("collides with the --compact pillar")
+            && msg.contains("(5.00, 5.00)")
+            && !msg.contains("internal error"),
+        "{msg}"
+    );
+    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, ConfigFile::default());
+    res.unwrap();
+    // two mounting holes so close their shoulders would merge
+    let (res, _d) = generate_package(
+        (0.0, 0.0, 40.0, 30.0),
+        &[(20.0, 15.0)],
+        &[(10.0, 10.0), (14.0, 10.0)],
+        compact_config(),
+    );
+    let msg = res.unwrap_err().to_string();
+    assert!(msg.contains("would merge"), "{msg}");
+}
+
+#[test]
+fn compact_widens_the_margin_only_as_far_as_the_board_edge_needs() {
+    let check = |pth: &[(f64, f64)], npth: &[(f64, f64)], config, margin: f64, warn: &str| {
+        let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), pth, npth, config);
+        let out = res.unwrap();
+        let l = &out.cassette.layout;
+        assert!(close(l.margin, margin), "{} vs {margin}", l.margin);
+        assert!(close(l.width, 40.0 + 2.0 * margin) && close(l.depth, 30.0 + 2.0 * margin));
+        let widened = out
+            .cassette
+            .warnings
+            .iter()
+            .find(|w| w.contains("--compact:"));
+        match widened {
+            Some(w) => assert!(!warn.is_empty() && w.contains(warn), "{w}"),
+            None => assert!(warn.is_empty(), "no warning for {warn}"),
+        }
+        for path in &out.stl_paths {
+            assert!(read_stl(path).topology().is_watertight(), "{path:?}");
+        }
+    };
+    let inner = [(20.0, 15.0), (24.0, 15.0)];
+    // mounting holes 2 mm from the edges: a 4.2 mm shoulder + 0.8 mm wall needs 0.9 mm more
+    let near = [(2.0, 2.0), (38.0, 28.0)];
+    check(
+        &inner,
+        &near,
+        compact_config(),
+        0.9,
+        "the pillar on the mounting hole at (2.00, 2.00)",
+    );
+    // a pogo bore 0.2 mm from the edge needs 0.585 + 0.8 - 0.2 -> 1.2 mm
+    let edge_pad = [(0.2, 15.0), (20.0, 15.0)];
+    check(&edge_pad, &near, compact_config(), 1.2, "pin 0 (H");
+    // nothing near the edge: the board outline exactly; an explicit margin is honoured
+    let far = [(5.0, 5.0), (35.0, 25.0)];
+    check(&inner, &far, compact_config(), 0.0, "");
+    let explicit = ConfigFile {
+        margin: Some(3.0),
+        split: Some(true),
+        ..compact_config()
+    };
+    check(&inner, &far, explicit, 3.0, "");
+}
+
+#[test]
+fn compact_is_watertight_and_split_is_flat_for_a_sweep_of_board_sizes() {
+    for (w, h) in [
+        (20.0, 20.0),
+        (35.5, 57.1),
+        (47.9, 41.3),
+        (64.2, 90.7),
+        (120.0, 75.0),
+    ] {
+        let npth = [
+            (4.0, 4.0),
+            (w - 4.0, 4.0),
+            (4.0, h - 4.0),
+            (w - 4.0, h - 4.0),
+        ];
+        for split in [false, true] {
+            let (res, _d) = generate_package(
+                (0.0, 0.0, w, h),
+                &[(10.0, 10.0), (14.0, 12.0)],
+                &npth,
+                ConfigFile {
+                    split: Some(split),
+                    ..compact_config()
+                },
+            );
+            let out = res.unwrap_or_else(|e| panic!("{w} x {h} split={split}: {e}"));
+            assert_eq!(out.stl_paths.len(), if split { 2 } else { 1 });
+            for path in &out.stl_paths {
+                let mesh = read_stl(path);
+                assert!(mesh.topology().is_watertight(), "{w} x {h} {path:?}");
+                assert_no_degenerate_triangles(&mesh, &format!("{w} x {h} {path:?}"));
+                let (lo, hi) = mesh.bounds().unwrap();
+                assert!(
+                    close(hi[0] - lo[0], w) && close(hi[1] - lo[1], h),
+                    "{w} x {h}"
+                );
+                assert!(close(lo[2], 0.0));
+                if split {
+                    assert_eq!(overhang_triangles(&mesh), 0, "{w} x {h} {path:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn compact_split_warns_when_the_pillars_do_not_surround_the_middle_of_the_plate() {
+    let tip = |bbox, pth: &[(f64, f64)], npth: &[(f64, f64)], split: bool| {
+        let config = ConfigFile {
+            split: Some(split),
+            ..compact_config()
+        };
+        let (res, _d) = generate_package(bbox, pth, npth, config);
+        let out = res.unwrap();
+        let w = out
+            .cassette
+            .warnings
+            .iter()
+            .find(|w| w.contains("can tip"))
+            .cloned();
+        w.map(|w| w.contains("one line"))
+    };
+    let small = (0.0, 0.0, 40.0, 30.0); // middle (20, 15)
+    let pth = [(20.0, 22.0), (24.0, 22.0)];
+    // two holes, or three exactly in a row: the plate rests on a line
+    assert_eq!(
+        tip(small, &pth, &[(5.0, 5.0), (35.0, 25.0)], true),
+        Some(true)
+    );
+    let row = [(5.0, 10.0), (20.0, 10.0), (35.0, 10.0)];
+    assert_eq!(tip(small, &pth, &row, true), Some(true));
+    // a thin triangle that misses the middle tips just the same
+    let thin = [(5.0, 10.0), (20.0, 10.5), (35.0, 10.0)];
+    assert_eq!(tip(small, &pth, &thin, true), Some(false));
+    let long = [(5.0, 10.0), (95.0, 10.0), (50.0, 15.0)];
+    assert_eq!(
+        tip(
+            (0.0, 0.0, 100.0, 60.0),
+            &[(50.0, 40.0), (54.0, 40.0)],
+            &long,
+            true
+        ),
+        Some(false)
+    );
+    // pillars around the middle carry it; one-piece, the plate is fused to them anyway
+    let around = [(5.0, 10.0), (35.0, 10.0), (20.0, 27.0)];
+    assert_eq!(tip(small, &pth, &around, true), None);
+    assert_eq!(tip(small, &pth, &row, false), None);
+}
+
+#[test]
+fn skipped_mounting_holes_get_no_post_or_pillar() {
+    // two real mounting holes plus a connector peg hole that must stay free
+    let npth = [(5.0, 5.0), (35.0, 25.0), (30.0, 8.0)];
+    let pth = [(20.0, 15.0), (24.0, 15.0)];
+    let skip = |config: ConfigFile| ConfigFile {
+        skip_mounting_holes: vec![[30.2, 7.9]], // matched to within 0.5 mm
+        ..config
+    };
+    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, compact_config());
+    assert_eq!(res.unwrap().cassette.layout.stepped_pillars.len(), 3);
+    for split in [false, true] {
+        let config = skip(ConfigFile {
+            split: Some(split),
+            ..compact_config()
+        });
+        let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, config);
+        let out = res.unwrap();
+        let l = &out.cassette.layout;
+        assert_eq!(l.stepped_pillars.len(), 2);
+        assert!(
+            l.posts
+                .iter()
+                .all(|p| p.center.distance(ict_jig_gen::geom::Point::new(30.0, 8.0)) > 1.0)
+        );
+        for path in &out.stl_paths {
+            let mesh = read_stl(path);
+            assert!(mesh.topology().is_watertight(), "{path:?}");
+            // nothing stands on the skipped hole: plain plate faces only
+            assert!(
+                vertices_near(&mesh, 30.0, 8.0, 14.0, 2.0).is_empty(),
+                "{path:?}"
+            );
+        }
+    }
+    // the default cassette honours it too
+    let (res, _d) = generate_package(
+        (0.0, 0.0, 40.0, 30.0),
+        &pth,
+        &npth,
+        skip(ConfigFile::default()),
+    );
+    assert_eq!(res.unwrap().cassette.layout.posts.len(), 2);
+    // skipping below two holes leaves compact without footing, and the message says why
+    let config = ConfigFile {
+        skip_mounting_holes: vec![[30.0, 8.0], [5.0, 5.0]],
+        ..compact_config()
+    };
+    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, config);
+    let msg = res.unwrap_err().to_string();
+    assert!(
+        msg.contains("--skip-mounting-hole") && msg.contains("has 1"),
+        "{msg}"
+    );
+    // a position that names no mounting hole is a typo, not a silent no-op
+    let config = ConfigFile {
+        skip_mounting_holes: vec![[30.0, 9.0]],
+        ..compact_config()
+    };
+    let (res, _d) = generate_package((0.0, 0.0, 40.0, 30.0), &pth, &npth, config);
+    let msg = res.unwrap_err().to_string();
+    assert!(msg.contains("no mounting hole within 0.5 mm"), "{msg}");
+}
+
+#[test]
+fn compact_split_refuses_pins_too_thin_to_print() {
+    let dir = tempfile::tempdir().unwrap();
+    let pkg = dir.path().join("pkg");
+    std::fs::create_dir(&pkg).unwrap();
+    common::write_package(
+        &pkg,
+        (0.0, 0.0, 40.0, 30.0),
+        &[(20.0, 15.0), (24.0, 15.0)],
+        &[],
+    );
+    // 1.5 mm mounting holes: the smallest that get a post at all
+    std::fs::write(
+        pkg.join("Drill_NPTH_Through.DRL"),
+        "M48\nMETRIC,TZ\nT1C1.5\n%\nT1\nX5.000Y5.000\nX35.000Y25.000\nM30\n",
+    )
+    .unwrap();
+    let run = |clearance: f64, split: bool| {
+        ict_jig_gen::app::generate(&ict_jig_gen::app::GenerateRequest {
+            input: pkg.clone(),
+            out_dir: dir.path().join("out"),
+            pnp: None,
+            config: ConfigFile {
+                clearance: Some(clearance),
+                split: Some(split),
+                ..compact_config()
+            },
+        })
+    };
+    // 1.5 - 0.15 = 1.35 mm pins are fine; 1.5 - 0.35 = 1.15 mm stand free too thin
+    run(0.15, true).unwrap();
+    let msg = run(0.35, true).unwrap_err().to_string();
+    assert!(
+        msg.contains("1.15 mm pin")
+            && msg.contains("--skip-mounting-hole 35.00,25.00")
+            && !msg.contains("internal error"),
+        "{msg}"
+    );
+    // one-piece, the pin is just a short post on a fused plate, as in the default cassette
+    run(0.35, false).unwrap();
+}
+
+#[test]
+fn compact_savings_compare_with_the_same_margin_when_it_is_valid() {
+    let savings = |margin: Option<f64>| {
+        let (out, _d) = generate_demo(ConfigFile {
+            margin,
+            ..compact_config()
+        });
+        out.cassette.savings.unwrap()
+    };
+    // compact default (0 mm) and a margin the default cassette refuses: compared with 8 mm
+    for margin in [None, Some(3.0)] {
+        let s = savings(margin);
+        assert!(
+            close(s.default_width, 76.0) && close(s.default_depth, 56.0),
+            "{s:?}"
+        );
+    }
+    // a valid margin is kept, so only the pillars differ
+    let s = savings(Some(10.0));
+    assert!(
+        close(s.default_width, 80.0) && close(s.default_depth, 60.0),
+        "{s:?}"
+    );
+    assert!(s.volume < s.default_volume);
+}

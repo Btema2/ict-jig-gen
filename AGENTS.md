@@ -55,7 +55,17 @@ Treat input as untrusted: malformed or missing files are errors, never panics.
 - Two-layer cassette in one STL (`cassette.stl`). Units are millimetres. Z is up (print orientation).
 - `--split` / `split = true` instead writes `cassette_bottom.stl` + `cassette_top.stl`, each
   watertight, on `Z = 0`, with no downward-facing surface above the bed (no supports), joined by
-  4x M3 screws into locating bosses. Never write `cassette.stl` in that mode.
+  4x M3 screws into locating bosses (screwless with `--compact`, below). Never write
+  `cassette.stl` in that mode.
+- `--compact` / `compact = true`: footprint = board-outline bounding box (margin 0 unless a
+  margin is set by flag or config file), no perimeter pillars and no M3 bosses. A stepped pillar
+  stands on each mounting hole not excluded by `--skip-mounting-hole X,Y` (>= 2 required, else a
+  clean error; `--alignment` only `auto`/`posts`): a round shoulder between the plates and a pin
+  (= the alignment post) through the top plate. With `--split` there are no screws: the bottom
+  part carries the pillars and pins (>= 1.2 mm), the top part is a flat plate with pogo bores and
+  pin sockets (pin + `--clearance`). Probe bores must keep `--min-wall` from every shoulder; the
+  margin auto-widens (with a warning) if a feature reaches the cassette edge. Same watertight /
+  `Z = 0` / no-overhang rules for both halves.
 - Mesh must be watertight/manifold. Pogo holes must fit the barrel (1.02 mm default).
 - Any change to cassette geometry requires the `verify-stl` skill before claiming success.
 

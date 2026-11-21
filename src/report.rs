@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use crate::board::Board;
 use crate::cassette::{
     Cassette, Joint, SCREW_HEAD_DIAMETER, SCREW_PILOT_DIAMETER, STL_BOTTOM_NAME, STL_TOP_NAME,
+    SteppedPillar,
 };
 use crate::config::{Mechanical, Typ};
 use crate::pinmap::{self, PinMap};
@@ -45,10 +46,13 @@ pub fn wiring_guide(
         "Cassette  : {:.2} x {:.2} x {:.2} mm; plates {:.2} mm, gap {:.2} mm",
         l.width, l.depth, l.height, mech.plate_thickness, mech.standoff_height
     );
+    if mech.compact {
+        compact_section(&mut out, cassette, mech);
+    }
     if let Some(joint) = &l.joint {
         assembly_section(&mut out, joint);
     }
-    if l.joint.is_some() {
+    if l.joint.is_some() || mech.compact {
         let _ = writeln!(out);
     }
     let _ = writeln!(
@@ -169,6 +173,101 @@ fn assembly_section(out: &mut String, joint: &Joint) {
     );
 }
 
+/// `4.20 mm`, or `4.20..5.20 mm` when the pillars differ (mounting holes of several sizes).
+fn span(pillars: &[SteppedPillar], value: fn(&SteppedPillar) -> f64) -> String {
+    let lo = pillars.iter().map(value).fold(f64::INFINITY, f64::min);
+    let hi = pillars.iter().map(value).fold(f64::NEG_INFINITY, f64::max);
+    if hi - lo < 0.005 {
+        format!("{lo:.2} mm")
+    } else {
+        format!("{lo:.2}..{hi:.2} mm")
+    }
+}
+
+/// Footprint, savings and (with `--split`) the screwless assembly of a `--compact` cassette.
+fn compact_section(out: &mut String, cassette: &Cassette, mech: &Mechanical) {
+    let l = &cassette.layout;
+    let pillars = &l.stepped_pillars;
+    let _ = writeln!(
+        out,
+        "Compact   : footprint = board outline + {:.2} mm margin; {} stepped pillars on the",
+        l.margin,
+        pillars.len()
+    );
+    let _ = writeln!(
+        out,
+        "            mounting holes (shoulder {}, pin/post {}) replace the perimeter pillars",
+        span(pillars, |s| s.shoulder_diameter),
+        span(pillars, |s| s.pin_diameter)
+    );
+    if let Some(s) = &cassette.savings {
+        let (area, default_area) = (l.width * l.depth, s.default_width * s.default_depth);
+        // signed: a large --margin can make the compact cassette the bigger one
+        let change = |part: f64, whole: f64| (part / whole - 1.0) * 100.0;
+        let _ = writeln!(
+            out,
+            "Vs default: footprint {area:.0} mm² vs {default_area:.0} mm² ({:+.0} %), plastic about \
+             {:.1} cm³ vs {:.1} cm³ ({:+.0} %)",
+            change(area, default_area),
+            s.volume / 1000.0,
+            s.default_volume / 1000.0,
+            change(s.volume, s.default_volume)
+        );
+        let _ = writeln!(
+            out,
+            "            against the {:.2} x {:.2} mm cassette without --compact (solid volume,",
+            s.default_width, s.default_depth
+        );
+        let _ = writeln!(
+            out,
+            "            before infill; print time changes roughly in proportion to the plastic)"
+        );
+    }
+    if !mech.split {
+        return;
+    }
+    let _ = writeln!(
+        out,
+        "\nCompact split assembly (--compact --split): two parts, printed flat, no supports, no screws"
+    );
+    let _ = writeln!(
+        out,
+        "  {STL_BOTTOM_NAME}  bottom plate + {} stepped pillars; each pin carries on as a post",
+        pillars.len()
+    );
+    let _ = writeln!(
+        out,
+        "  {STL_TOP_NAME}     flat top plate: the pogo bores and a {} socket per pin",
+        span(pillars, |s| s.socket_diameter)
+    );
+    let _ = writeln!(
+        out,
+        "  Hardware: none. The sockets are pin + --clearance, the same slip fit as the pogo bores."
+    );
+    let _ = writeln!(
+        out,
+        "  1. Print both files as exported: no supports, no rotating."
+    );
+    let _ = writeln!(
+        out,
+        "  2. Fit the pogo pins and wires into the bottom part (wire table below)."
+    );
+    let _ = writeln!(
+        out,
+        "  3. Slide the top plate down over the pins, its bores over the pogo barrels, until it"
+    );
+    let _ = writeln!(
+        out,
+        "     rests on the shoulders ({:.2} mm above the base).",
+        l.z_top_plate_bottom
+    );
+    let _ = writeln!(
+        out,
+        "  4. Lay the board on the plate, the posts through its mounting holes. Pressing the board"
+    );
+    let _ = writeln!(out, "     down in the fixture holds the stack together.");
+}
+
 /// Table of every plated hole with its id, so users can pick probes (`H<id>`).
 pub fn hole_listing(board: &Board) -> String {
     let mut out = String::new();
@@ -202,7 +301,7 @@ pub fn hole_listing(board: &Board) -> String {
     }
     let _ = writeln!(
         out,
-        "\nMounting holes (alignment posts): {}",
+        "\nMounting holes (alignment posts / --compact pillars; --skip-mounting-hole X,Y leaves one out): {}",
         board.mounting.len()
     );
     for h in &board.mounting {

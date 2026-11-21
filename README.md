@@ -3,7 +3,9 @@
 Pure-Rust CLI that turns an **EasyEDA Gerber/Excellon export** into
 
 1. a 3D-printable, two-layer **pogo-pin test cassette** (`cassette.stl`, or with `--split` two
-   support-free halves `cassette_bottom.stl` + `cassette_top.stl`) for a 16-channel ICT fixture,
+   support-free halves `cassette_bottom.stl` + `cassette_top.stl`) for a 16-channel ICT fixture;
+   `--compact` trims it to the board outline and stands it on the board's mounting holes,
+   which saves plastic and print time (and, with `--split`, the screws),
 2. `lista_elementow.json`, the pin map read by the ICT-SCAN PRO desktop app,
 3. `wiring_guide.txt`, which numbered wire goes into which hole of the printed cassette.
 
@@ -61,6 +63,8 @@ just preview-top out/cassette.stl out/top.png
 ```
 
 With `--split -o out`, preview `out/cassette_bottom.stl` and `out/cassette_top.stl` the same way.
+Add `--compact` for the board-outline cassette standing on the 4 mounting holes (with `--split`:
+two screwless halves).
 
 `tests/fixtures/gen_fixture.py` regenerates the fixture: a 60 x 40 mm board, 4 mounting holes
 and 13 plated pads (R1, R2, D1, D2, a 3-pin U1, a 2-pin power header J1).
@@ -95,12 +99,14 @@ footprint and pin the pads down with `H<n>` instead.
 | `--clearance` | 0.15 | added to the barrel diameter for the printed bore (hole = 1.17 mm by default) |
 | `--plate-thickness` | 3 | each guide plate |
 | `--standoff-height` | 8 | gap between the plates |
-| `--margin` | 8 (min 7) | plate overhang around the outline |
+| `--margin` | 8 (min 7); 0 with `--compact` | plate overhang around the outline; a `margin` in the config file counts as set, also for `--compact` |
 | `--min-wall` | 0.8 | smallest printable wall between features |
 | `--lip-height` | 1 | height of the registration lip |
 | `--pcb-thickness` | 1.6 | sets alignment-post height |
 | `--alignment` | `auto` | `auto`, `posts`, `lip`, `both`, `none` |
 | `--split` / `--no-split` (`split = true`) | off | write `cassette_bottom.stl` + `cassette_top.stl` that print flat without supports, joined by 4 M3 screws (see [Split mode](#split-mode-print-without-supports)) |
+| `--compact` / `--no-compact` (`compact = true`) | off | footprint = board outline, pillars on the mounting holes instead of the perimeter; needs >= 2 mounting holes (see [Compact mode](#compact-mode-less-plastic-no-screws)) |
+| `--skip-mounting-hole X,Y` (`skip_mounting_holes = [[x, y]]`) | none | give the mounting hole at board X,Y (mm, within 0.5 mm, as `holes` lists it) no alignment post or compact pillar, e.g. a hole filled by a connector's locating peg; repeatable, any mode |
 | `--image` / `--image-size` | `512x512` | pixel size for the JSON; `--image` reads a PNG/JPEG header, `--image-size WxH` wins |
 
 ## What the cassette looks like
@@ -124,6 +130,7 @@ origin at the lower-left corner of the footprint (board bounding box + margin).
 * **Checks:** the tool refuses two probe holes closer than `hole + min-wall` (1.97 mm for
   P75-LM2; 2.31 mm for P100-E2), holes that would clash with posts, pillars or the lip, and warns
   when the plate stack is too tall for the plunger to rise by its stroke above the top plate.
+  `--compact` adds its own checks (see [Compact mode](#compact-mode-less-plastic-no-screws)).
 * **Printing:** the top plate bridges the open cavity, so print with support enabled (the cavity
   is open on all sides, so supports can be removed and wires routed out sideways), or use
   `--split` to avoid supports altogether. The mesh is
@@ -177,6 +184,79 @@ clear the lip, and a warning says so. A mounting-hole post closer than a screw h
 screw is refused with a message to increase `--margin`. Files from the other mode that an earlier
 run left in the output directory are never deleted, but a warning names them. A warning is also
 printed when the pillars are too short for a reliable M3 thread (increase `--standoff-height`).
+
+Boards with two or more mounting holes can skip the screws: `--compact --split` joins the halves
+on pillars at the mounting holes instead (next section).
+
+## Compact mode: less plastic, no screws
+
+The default cassette carries an 8 mm margin of plate around the board and square pillars in it.
+`--compact` (or `compact = true`) drops both. The footprint becomes the board outline's bounding
+box (margin 0 unless a margin is set with `--margin` or `margin =` in the config file), and the
+plates stand on a **stepped pillar at each mounting hole** instead of on perimeter pillars and
+screw bosses:
+
+```
+          ╻  post, tapered tip: goes into the board's mounting hole
+   ━━━━━━━┃━━━━━━━━  top plate (z2..z3)
+         ┌┸┐         shoulder: carries the top plate
+   ━━━━━━┷━┷━━━━━━━  bottom plate (z0..z1)
+```
+
+* The **pin** is the mounting hole minus `--clearance` (the same diameter as an alignment post).
+  It rises through the top plate and ends as the tapered post that locates the board.
+* The **shoulder** between the plates is the pin socket plus a 1 mm ledge all round (4.2 mm for
+  2.2 mm holes, 5.2 mm for M3 holes of 3.2 mm).
+* Every mounting hole >= 1.5 mm gets a pillar. A hole that must stay free, for example one filled
+  by a connector's locating peg, is left out with `--skip-mounting-hole X,Y` (board mm, as
+  `ict-jig-gen holes` lists it; repeatable).
+
+```bash
+ict-jig-gen generate board_gerber.zip --pnp PickAndPlace_board.csv --compact -o out          # one piece
+ict-jig-gen generate board_gerber.zip --pnp PickAndPlace_board.csv --compact --split -o out  # two parts, no screws
+```
+
+| Mode | Files | Printing |
+|---|---|---|
+| `--compact` | `cassette.stl`: pillars fused into both plates | the top plate still bridges the cavity: print with supports |
+| `--compact --split` | `cassette_bottom.stl`: bottom plate + stepped pillars, pins up to the post tips; `cassette_top.stl`: flat top plate with the pogo bores and one socket (pin + `--clearance`) per pin | both flat on the bed, no supports, no overhangs, no hardware |
+
+**Assembly (`--compact --split`):**
+
+1. Print both files as exported.
+2. Fit the pogo pins and wires into the bottom part (`wiring_guide.txt` has the table).
+3. Slide the top plate down over the pins, bores over the pogo barrels, until it rests on the
+   shoulders. It only goes on where its sockets meet the pins and its bores meet the barrels, so it
+   cannot be fitted wrongly.
+4. Lay the board on the plate, posts through its mounting holes. Nothing is screwed: pressing the
+   board down in the fixture holds the stack together.
+
+**Savings:** `wiring_guide.txt` compares the result with the cassette the same settings give
+without `--compact` (with the default 8 mm margin when yours is below its 7 mm minimum). For the
+bundled 60 x 40 mm demo board: 60 x 40 mm instead of 76 x 56 mm (-44 % footprint) and about
+15 cm³ of plastic instead of 27 cm³ (-45 %, solid volume before infill). Print time drops roughly
+in proportion to the plastic.
+
+**Requirements and checks:**
+
+* At least 2 mounting holes >= 1.5 mm, as `ict-jig-gen holes` lists them (non-plated, or plated
+  >= 2.5 mm when the package has no NPTH file), not counting skipped ones. With fewer, generation
+  stops and suggests the default cassette with `--alignment auto` or `lip`, which locates the board
+  with a registration lip.
+* `--alignment` must be `auto` or `posts`: a lip does not fit on the board outline.
+* A pogo bore closer than `--min-wall` to a shoulder (the barrel passes it in the cavity), or two
+  shoulders that would merge, stop generation with a message naming the pin and the mounting hole
+  (board coordinates, as `ict-jig-gen holes` lists them).
+* If a pogo bore or a shoulder would come within `--min-wall` of the cassette edge, the margin is
+  widened just enough (rounded up to 0.1 mm) and a warning says so.
+* With `--split` each pin stands free, so a pin thinner than 1.2 mm (a small hole with a large
+  `--clearance`) stops generation; reduce `--clearance` or skip that hole.
+* With `--split`, a warning notes when the pillars do not surround the middle of the top plate
+  (every board with exactly two mounting holes, or holes along one side): the loose plate can then
+  tip when the board is pressed, so press close to the posts.
+
+`--no-compact` overrides `compact = true` from a config file. If that file also sets a margin
+under 7 mm, pass `--margin` too.
 
 ## Output files
 

@@ -72,7 +72,8 @@ fn load_board(input: &Path, pnp_override: Option<&Path>, include_vias: bool) -> 
 /// Run the whole pipeline and write the outputs.
 pub fn generate(req: &GenerateRequest) -> Result<Outputs> {
     let settings = Settings::resolve(req.config.clone())?;
-    let board = load_board(&req.input, req.pnp.as_deref(), settings.include_vias)?;
+    let mut board = load_board(&req.input, req.pnp.as_deref(), settings.include_vias)?;
+    board.skip_mounting_holes(&settings.skip_mounting_holes)?;
     let pin_map = PinMap::build(&board, &settings)?;
     let size = settings.image.resolve()?;
     let cassette = cassette::build(&board, &pin_map.probes, &settings.mech)?;
