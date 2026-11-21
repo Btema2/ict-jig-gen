@@ -97,13 +97,14 @@ footprint and pin the pads down with `H<n>` instead.
 | `--clearance` | 0.15 | added to the barrel diameter for the printed bore (hole = 1.17 mm by default) |
 | `--plate-thickness` | 3 | each guide plate |
 | `--standoff-height` | 8 | gap between the plates |
-| `--margin` | 8 (min 7); 0 with `--compact` | plate overhang around the outline |
+| `--margin` | 8 (min 7); 0 with `--compact` | plate overhang around the outline; a `margin` in the config file counts as set, also for `--compact` |
 | `--min-wall` | 0.8 | smallest printable wall between features |
 | `--lip-height` | 1 | height of the registration lip |
 | `--pcb-thickness` | 1.6 | sets alignment-post height |
 | `--alignment` | `auto` | `auto`, `posts`, `lip`, `both`, `none` |
 | `--split` / `--no-split` (`split = true`) | off | write `cassette_bottom.stl` + `cassette_top.stl` that print flat without supports, joined by 4 M3 screws (see [Split mode](#split-mode-print-without-supports)) |
 | `--compact` / `--no-compact` (`compact = true`) | off | footprint = board outline, pillars on the mounting holes instead of the perimeter; needs >= 2 mounting holes (see [Compact mode](#compact-mode-less-plastic-no-screws)) |
+| `--skip-mounting-hole X,Y` (`skip_mounting_holes = [[x, y]]`) | none | give the mounting hole at board X,Y (mm, within 0.5 mm, as `holes` lists it) no alignment post or compact pillar, e.g. a hole filled by a connector's locating peg; repeatable, any mode |
 | `--image` / `--image-size` | `512x512` | pixel size for the JSON; `--image` reads a PNG/JPEG header, `--image-size WxH` wins |
 
 ## What the cassette looks like
@@ -189,8 +190,9 @@ on pillars at the mounting holes instead (next section).
 
 The default cassette carries an 8 mm margin of plate around the board and square pillars in it.
 `--compact` (or `compact = true`) drops both. The footprint becomes the board outline's bounding
-box (margin 0 unless you pass `--margin`), and the plates stand on a **stepped pillar at each
-mounting hole** instead of on perimeter pillars and screw bosses:
+box (margin 0 unless a margin is set with `--margin` or `margin =` in the config file), and the
+plates stand on a **stepped pillar at each mounting hole** instead of on perimeter pillars and
+screw bosses:
 
 ```
           ╻  post, tapered tip: goes into the board's mounting hole
@@ -203,6 +205,9 @@ mounting hole** instead of on perimeter pillars and screw bosses:
   It rises through the top plate and ends as the tapered post that locates the board.
 * The **shoulder** between the plates is the pin socket plus a 1 mm ledge all round (4.2 mm for
   2.2 mm holes, 5.2 mm for M3 holes of 3.2 mm).
+* Every mounting hole >= 1.5 mm gets a pillar. A hole that must stay free, for example one filled
+  by a connector's locating peg, is left out with `--skip-mounting-hole X,Y` (board mm, as
+  `ict-jig-gen holes` lists it; repeatable).
 
 ```bash
 ict-jig-gen generate board_gerber.zip --pnp PickAndPlace_board.csv --compact -o out          # one piece
@@ -224,27 +229,32 @@ ict-jig-gen generate board_gerber.zip --pnp PickAndPlace_board.csv --compact --s
 4. Lay the board on the plate, posts through its mounting holes. Nothing is screwed: pressing the
    board down in the fixture holds the stack together.
 
-**Savings:** `wiring_guide.txt` compares the result with the default cassette for the same board
-and settings. For the bundled 60 x 40 mm demo board: 60 x 40 mm instead of 76 x 56 mm (-44 %
-footprint) and about 15 cm³ of plastic instead of 27 cm³ (-45 %, solid volume before infill).
-Print time drops roughly in proportion to the plastic.
+**Savings:** `wiring_guide.txt` compares the result with the cassette the same settings give
+without `--compact` (with the default 8 mm margin when yours is below its 7 mm minimum). For the
+bundled 60 x 40 mm demo board: 60 x 40 mm instead of 76 x 56 mm (-44 % footprint) and about
+15 cm³ of plastic instead of 27 cm³ (-45 %, solid volume before infill). Print time drops roughly
+in proportion to the plastic.
 
 **Requirements and checks:**
 
-* At least 2 mounting holes >= 1.5 mm (non-plated, or plated >= 2.5 mm when the package has no
-  NPTH file). With fewer, generation stops and suggests the default cassette, which falls back to
-  a registration lip.
+* At least 2 mounting holes >= 1.5 mm, as `ict-jig-gen holes` lists them (non-plated, or plated
+  >= 2.5 mm when the package has no NPTH file), not counting skipped ones. With fewer, generation
+  stops and suggests the default cassette with `--alignment auto` or `lip`, which locates the board
+  with a registration lip.
 * `--alignment` must be `auto` or `posts`: a lip does not fit on the board outline.
 * A pogo bore closer than `--min-wall` to a shoulder (the barrel passes it in the cavity), or two
   shoulders that would merge, stop generation with a message naming the pin and the mounting hole
   (board coordinates, as `ict-jig-gen holes` lists them).
 * If a pogo bore or a shoulder would come within `--min-wall` of the cassette edge, the margin is
   widened just enough (rounded up to 0.1 mm) and a warning says so.
-* With `--split`, a warning notes when all pillars stand in one line (every board with exactly two
-  mounting holes): the loose top plate then rests on that line only, so press the board down
-  close to the posts.
+* With `--split` each pin stands free, so a pin thinner than 1.2 mm (a small hole with a large
+  `--clearance`) stops generation; reduce `--clearance` or skip that hole.
+* With `--split`, a warning notes when the pillars do not surround the middle of the top plate
+  (every board with exactly two mounting holes, or holes along one side): the loose plate can then
+  tip when the board is pressed, so press close to the posts.
 
-`--no-compact` overrides `compact = true` from a config file.
+`--no-compact` overrides `compact = true` from a config file. If that file also sets a margin
+under 7 mm, pass `--margin` too.
 
 ## Output files
 
